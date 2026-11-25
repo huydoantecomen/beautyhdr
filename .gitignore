@@ -1,0 +1,17 @@
+# môi trường Python và file build (packaging/build_windows.ps1 gom hết vào _build)
+.venv/
+.venv-*/
+_build/
+build/
+dist/
+output/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+# model AI (tải khi cần) và file cài đặt tạo ra
+weights/
+*.pth
+*.onnx
+NetAnh-*-setup.exe
+NetAnh-*-GPU-NVIDIA/

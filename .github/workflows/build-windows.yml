@@ -1,0 +1,79 @@
+# Build bản Windows của Beauty HDR trên máy GitHub (windows-latest), tự kiểm, xuất bộ cài (một file setup.exe cho bản cpu).
+# Chạy tay: tab Actions → "Build Windows" → Run workflow. Đẩy tag v0.3.0 → tự build cả hai bản và đăng lên Releases.
+name: Build Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      flavor:
+        description: "cpu (nhẹ, mọi máy) | cuda (GPU NVIDIA, nặng ~3 GB) | both"
+        default: cpu
+        type: choice
+        options: [cpu, cuda, both]
+      models:
+        description: "Kèm model AI trong bộ cài (~620 MB)"
+        default: true
+        type: boolean
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [cpu, cuda]
+    env:
+      PIP_NO_CACHE_DIR: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - name: Bỏ qua bản không được chọn
+        id: gate
+        shell: pwsh
+        run: |
+          $want = "${{ github.event_name == 'push' && 'both' || inputs.flavor }}"
+          "run=$($want -eq 'both' -or $want -eq '${{ matrix.flavor }}')" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'True'
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'True'
+        with:
+          python-version: "3.12"
+
+      - name: Cài Inno Setup (nếu máy chưa có)
+        if: steps.gate.outputs.run == 'True'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: Build + tự kiểm + bộ cài
+        if: steps.gate.outputs.run == 'True'
+        shell: pwsh
+        run: |
+          $extra = @()
+          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.models }}" -ne "true") { $extra += "-NoModels" }
+          ./packaging/build_windows.ps1 -Flavor ${{ matrix.flavor }} -Python python @extra
+
+      - name: Tải lên kết quả
+        if: steps.gate.outputs.run == 'True'
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetAnh-${{ matrix.flavor }}
+          path: |
+            _build/output/*
+            _build/tu_kiem_*.log
+          compression-level: 0
+          retention-days: 14
+
+      - name: Đăng lên Releases (khi đẩy tag)
+        if: steps.gate.outputs.run == 'True' && startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: _build/output/*

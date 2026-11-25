@@ -1,0 +1,22 @@
+{
+  "_ghi_chu": "Thư mục Drive chứa model (đặt Bất kỳ ai có đường liên kết, tên file giữ nguyên như bản gốc): app tự liệt kê. Nếu không liệt kê được, dán link từng file vào files. File nào không có trên Drive thì tải từ nguồn gốc.",
+  "folder": "https://drive.google.com/drive/folders/1hgKra9SrY4ElXbP9B6TZGCaZRB3WMwaf",
+  "files": {
+    "realesr-general-x4v3.pth": "",
+    "realesr-general-wdn-x4v3.pth": "",
+    "detection_Resnet50_Final.pth": "",
+    "parsing_parsenet.pth": "",
+    "GFPGANv1.4.pth": "",
+    "age-v1.onnx": "",
+    "gender-v1.onnx": "",
+    "RestoreFormer++.ckpt": "",
+    "RestoreFormer.pth": "",
+    "4xRealWebPhoto_v4_dat2.safetensors": "",
+    "4xNomosWebPhoto_RealPLKSR.safetensors": "",
+    "RealESRGAN_x2plus.pth": "",
+    "RealESRGAN_x4plus.pth": "",
+    "recognition_arcface_ir_se50.pth": "",
+    "big-lama.pt": "",
+    "scratch_detect_fp16.pth": ""
+  }
+}

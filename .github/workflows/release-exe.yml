@@ -1,0 +1,89 @@
+# Phát hành "một file exe": BeautyHDR.exe (bộ khởi động nhỏ) + gói app CPU và GPU (cắt phần dưới 2 GB) + update.json.
+# BeautyHDR.exe mở lên tự tải app + model, và tự cập nhật khi có bản mới (đọc update.json ở Releases mới nhất).
+# KHO PHẢI CÔNG KHAI thì app trên máy người dùng mới tải được. Chạy tay: Actions → "Release exe" → Run workflow,
+# hoặc đẩy tag v<phiên bản> (trùng net_anh/__init__.py).
+name: Release exe
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  app:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [cpu, cuda]
+    env:
+      PIP_NO_CACHE_DIR: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Đóng gói app (không model, không bộ cài) + tự kiểm
+        shell: pwsh
+        run: ./packaging/build_windows.ps1 -Flavor ${{ matrix.flavor }} -Python python -NoModels -NoInstaller
+      - name: Nén và cắt phần
+        shell: pwsh
+        run: python tools/make_release_parts.py _build/dist/NetAnh parts ${{ matrix.flavor }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ matrix.flavor }}
+          path: |
+            parts/*
+            _build/tu_kiem_*.log
+          compression-level: 0
+          retention-days: 7
+
+  launcher:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Kiểm bộ khởi động
+        shell: pwsh
+        run: |
+          pip install pytest
+          python -c "import ast,sys; ast.parse(open('launcher/beautyhdr_launcher.py',encoding='utf-8').read())"
+      - name: Build BeautyHDR.exe
+        shell: pwsh
+        run: |
+          pip install pyinstaller
+          python -m PyInstaller --noconfirm --onefile --windowed --name BeautyHDR --icon packaging/net_anh.ico launcher/beautyhdr_launcher.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: launcher
+          path: dist/BeautyHDR.exe
+
+  release:
+    needs: [app, launcher]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: art
+      - name: Gom file và tạo update.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER=$(grep -oP '__version__ = "\K[^"]+' net_anh/__init__.py)
+          mkdir -p rel meta
+          cp art/app-*/parts/BeautyHDR-app-* rel/
+          cp art/app-*/parts/*.json meta/
+          cp art/launcher/BeautyHDR.exe rel/
+          python tools/make_update_json.py "$VER" "${{ github.repository }}" meta > rel/update.json
+          cat rel/update.json
+          ls -la rel
+          gh release delete "v$VER" -y --cleanup-tag || true
+          gh release create "v$VER" rel/* --title "Beauty HDR $VER" --notes "Tải BeautyHDR.exe và chạy: app và model tự tải về, mở lần sau tự cập nhật. Các file BeautyHDR-app-* là phần gói app, không cần tải tay."

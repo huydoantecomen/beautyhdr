@@ -1,0 +1,18 @@
+NÉT ẢNH CHO WINDOWS: TẠO VÀ CÀI MỘT FILE DUY NHẤT
+
+1. Giải nén cả file zip ra một thư mục bất kỳ. Đường dẫn có dấu tiếng Việt hay dấu cách đều được.
+
+2. Bấm đúp TAO_FILE_CAI_DAT.bat. Cửa sổ đen sẽ tự cài những gì còn thiếu rồi tạo file cài đặt.
+   Lần đầu mất khoảng 20-40 phút và cần mạng. Đừng tắt cửa sổ cho tới khi hiện chữ XONG.
+   Nếu Windows hiện "Windows protected your PC": bấm "More info" rồi "Run anyway".
+
+3. Khi xong, thư mục tự mở và chọn sẵn file NetAnh-{ver}-setup.exe. Bấm đúp file đó để cài,
+   rồi mở "Beauty HDR" từ menu Start (hoặc biểu tượng ngoài màn hình nếu đã chọn khi cài).
+
+Chỉ cần giữ file NetAnh-{ver}-setup.exe; muốn cài sang máy khác cũng chỉ cần chép file này.
+Thư mục ma-nguon là mã nguồn để tạo file cài đặt, không cần mở. Nếu cửa sổ đen báo LỖI,
+chụp màn hình gửi lại.
+
+Model chất lượng cao nhất (RestoreFormer++, DAT-2, khoảng 430 MB) không nằm trong file cài: app tự tải
+khi chọn mức nét 6 hoặc khi bấm tải trong Quản lý model. Máy không có GPU NVIDIA vẫn chạy được, chỉ
+chậm hơn nhiều; app báo thời gian ước tính trước khi chạy.
