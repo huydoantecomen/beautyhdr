@@ -8,6 +8,8 @@ on:
   workflow_dispatch:
   push:
     tags: ["v*"]
+    branches: [main]
+    paths: [".release-trigger"]  # sửa file này rồi đẩy lên main là build và phát hành
 
 permissions:
   contents: write
