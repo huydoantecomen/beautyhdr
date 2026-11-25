@@ -844,6 +844,10 @@ class Histogram(QWidget):
 
 # ---------------------------------------------------------------- cửa sổ chính
 
+LOOK_TIP = ("Tông mẫu: đưa màu da, môi, tóc, vùng trắng và nền về gần tông của một bộ ảnh mẫu. Trong sáng: da sáng, "
+            "trong, ít vàng đỏ; môi tươi; tóc đen; nền phẳng sạch (đo từ ảnh thẻ mẫu). Bộ preset .netanh.json có kèm "
+            "tông mẫu sẽ hiện thêm ở đây. Mặc định: Giữ tông ảnh.")
+DESHINE_DEFAULT = 0.6  # cường độ khử bóng da khi vừa tích ô (đo trên ảnh chân dung da dầu của huy)
 BG_SWATCHES = (("Trắng", (255, 255, 255)), ("Xanh", (219, 142, 67)), ("Xanh nhạt", (235, 206, 135)),
                ("Đỏ", (30, 30, 200)), ("Xám kem", (203, 212, 217)))
 SUBJECT_ITEMS = [("auto", "Tự động theo tuổi, giới tính"), ("child", "Trẻ em"), ("man", "Nam"), ("woman", "Nữ"),
@@ -968,7 +972,8 @@ class PresetDialog(QDialog):
         self.table.setHorizontalHeaderLabels([facestyle.KNOB_NAMES[k] for k in facestyle.RANGES])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setToolTip("Giữ nét thật: giữ thêm mặt gốc (đúng người, đúng tuổi). Ngũ quan: + sắc nét mắt, mày, môi; "
-                              "− bớt AI. Mịn da, Bóng da, Sáng da: 0..1. Hồng hào: + ấm hồng, − mát hơn.")
+                              "− bớt AI. Mịn da, Bóng da, Sáng da: 0..1. Hồng hào: + ấm hồng, − mát hơn. Khử bóng: cộng vào "
+                              "thanh Khử bóng da chung, chỉ có tác dụng khi ô Khử bóng da được tích.")
         self.spins: dict[tuple[str, str], QDoubleSpinBox] = {}
         for r, subj in enumerate(facestyle.SUBJECT_KEYS):
             for c, knob in enumerate(facestyle.RANGES):
@@ -980,6 +985,11 @@ class PresetDialog(QDialog):
                 sp.valueChanged.connect(self._edited)
                 self.table.setCellWidget(r, c, sp)
                 self.spins[(subj, knob)] = sp
+        from . import look as lookmod
+        self.look_pick = QComboBox()  # tông mẫu kèm bộ (bộ người dùng): không có / tông có sẵn / tông của chính bộ
+        self.look_pick.setToolTip(LOOK_TIP)
+        self._looks = lookmod.LOOKS
+        self.look_pick.currentIndexChanged.connect(self._look_edited)
         b_use = QPushButton("Dùng bộ này")
         b_copy = QPushButton("Tạo bản sao…")
         b_rename = QPushButton("Đổi tên…")
@@ -1002,6 +1012,10 @@ class PresetDialog(QDialog):
         right = QVBoxLayout()
         right.addWidget(self.info)
         right.addWidget(self.table, 1)
+        lrow = QHBoxLayout()
+        lrow.addWidget(QLabel("Tông mẫu kèm bộ:"))
+        lrow.addWidget(self.look_pick, 1)
+        right.addLayout(lrow)
         hint = QLabel("Mỗi khuôn mặt được đoán tuổi, giới tính rồi chỉnh theo dòng của nhóm mình (ảnh gia đình: mỗi người "
                       "một kiểu). File xuất (.netanh.json) gửi qua Zalo, email; người nhận bấm Nạp từ file, dùng được cả "
                       "trên điện thoại.")
@@ -1040,6 +1054,20 @@ class PresetDialog(QDialog):
         for (subj, knob), sp in self.spins.items():
             sp.setValue(getattr(st.style(subj), knob))
             sp.setEnabled(not st.builtin)
+        self.look_pick.clear()
+        self.look_pick.addItem("Không (giữ tông ảnh)", None)
+        for k, lk in self._looks.items():
+            self.look_pick.addItem(lk.name, k)
+        idx = 0
+        if st.look:
+            match = [k for k, lk in self._looks.items() if lk.to_dict() == st.look]
+            if match:
+                idx = self.look_pick.findData(match[0])
+            else:
+                self.look_pick.addItem(f"{st.look.get('name', 'Tông riêng')} (của bộ này)", "__own__")
+                idx = self.look_pick.count() - 1
+        self.look_pick.setCurrentIndex(idx)
+        self.look_pick.setEnabled(not st.builtin)
         self._loading = False
         meta = " · ".join(x for x in (st.author and f"Tác giả: {st.author}", st.created and f"Ngày: {st.created}") if x)
         self.info.setText(f"<b>{st.name}</b>" + (f"<br>{meta}" if meta else "") + (f"<br>{st.note}" if st.note else "")
@@ -1051,6 +1079,16 @@ class PresetDialog(QDialog):
             return
         for subj in facestyle.SUBJECT_KEYS:
             st.styles[subj] = facestyle.FaceStyle(**{k: self.spins[(subj, k)].value() for k in facestyle.RANGES})
+        self.lib.save(st)
+
+    def _look_edited(self, *_):
+        st = self.current()
+        if self._loading or st is None or st.builtin:
+            return
+        k = self.look_pick.currentData()
+        if k == "__own__":
+            return
+        st.look = self._looks[k].to_dict() if k else None
         self.lib.save(st)
 
     def _use(self):
@@ -1415,6 +1453,27 @@ class MainWindow(QMainWindow):
         self.sl_skin = Slider(0, 100)
         self.sl_color = Slider(0, 100)
         self.sl_gloss = Slider(0, 100)
+        # Khử bóng loáng da: không bắt buộc, mặc định tắt. Một thông số chung: ô ở Đơn giản và ô ở Chuyên sâu luôn
+        # cùng trạng thái; thanh cường độ chỉ ở Chuyên sâu (bật lần đầu: 60 %).
+        ds_tip = ("Giảm vệt sáng chói do da dầu ở trán, mũi, gò má, cằm. Chỉ sửa vùng da mặt (không đụng mắt, môi, "
+                  "tóc), giữ vân da và khối mặt. Không bắt buộc, mặc định tắt.")
+        self.cb_deshine = QCheckBox("Bật")
+        self.cb_deshine2 = QCheckBox("Khử bóng loáng da")
+        self.sl_deshine = Slider(0, 100)
+        self.sl_deshine.set(DESHINE_DEFAULT)
+        self.sl_deshine.setEnabled(False)
+        for w in (self.cb_deshine, self.cb_deshine2, self.sl_deshine):
+            w.setToolTip(ds_tip)
+        # Tông mẫu (look.py): tuỳ chọn của người dùng như Khử bóng da; hai ô chọn (Đơn giản, Chuyên sâu) luôn cùng giá trị,
+        # thanh độ mạnh chỉ ở Chuyên sâu
+        self.look_box = QComboBox()
+        self.look_box2 = QComboBox()
+        self.sl_look = Slider(0, 100)
+        self.sl_look.set(1.0)
+        self.sl_look.setEnabled(False)
+        for w in (self.look_box, self.look_box2, self.sl_look):
+            w.setToolTip(LOOK_TIP)
+        self._fill_looks()
         self.face_model = QComboBox()
         for key, text in FACE_MODEL_ITEMS:
             self.face_model.addItem(text, key)
@@ -1504,6 +1563,18 @@ class MainWindow(QMainWindow):
         ol.addWidget(self.btn_damage2, 0, Qt.AlignmentFlag.AlignLeft)
         sl.addWidget(self.id_box)
         sl.addWidget(self.old_box)
+        sl.addWidget(header_bar("Tuỳ chọn thêm"))
+        ow = QVBoxLayout()
+        ow.setContentsMargins(10, 8, 10, 8)
+        ow.addWidget(self.cb_deshine2)
+        lr = QHBoxLayout()
+        lr.setSpacing(6)
+        lab_look = QLabel("Tông màu")
+        lab_look.setObjectName("muted")
+        lr.addWidget(lab_look)
+        lr.addWidget(self.look_box2, 1)
+        ow.addLayout(lr)
+        sl.addLayout(ow)
         sl.addWidget(header_bar("Mức làm nét"))
         pw = QVBoxLayout()
         pw.setContentsMargins(10, 10, 10, 10)
@@ -1587,7 +1658,7 @@ class MainWindow(QMainWindow):
         self.btn_models = b_models
         sec_level.add("", b_models, "quan ly model tai")
         sec_face = Section("Khuôn mặt", on_reset=lambda: self._reset_fields(
-            "fidelity", "detail_fidelity", "keep_lips", "skin_tone", "gloss", "subject"))
+            "fidelity", "detail_fidelity", "keep_lips", "skin_tone", "gloss", "deshine", "subject"))
         sec_face.add("Đối tượng", self.subject, "tuoi gioi tinh tre em nam nu")
         sec_face.add("Trung thực AI", self.sl_fid, "do trung thuc giu mat goc")
         sec_face.add("Trung thực mắt, môi", dtw, "mat moi ngu quan")
@@ -1595,13 +1666,22 @@ class MainWindow(QMainWindow):
         sec_face.add("", self.cb_keep_lips, "moi")
         sec_face.add("Sửa màu da", self.sl_skin, "da")
         sec_face.add("Độ bóng da", self.sl_gloss, "da bong")
+        dsw = QWidget()
+        dsl = QHBoxLayout(dsw)
+        dsl.setContentsMargins(0, 0, 0, 0)
+        dsl.setSpacing(6)
+        dsl.addWidget(self.cb_deshine)
+        dsl.addWidget(self.sl_deshine, 1)
+        sec_face.add("Khử bóng da", dsw, "da bong dau loang chop mui tran khu bong deshine")
         sec_light = Section("Ánh sáng và tông", on_reset=lambda: self._reset_fields(
-            "exposure", "brightness", "contrast", "tone", "low_light"))
+            "exposure", "brightness", "contrast", "tone", "low_light", "look", "look_amount"))
         sec_light.add("Tự sửa sáng", self.sl_expo, "phoi sang toi chay nguoc sang")
         sec_light.add("Độ sáng", self.sl_bright)
         sec_light.add("Tương phản", self.sl_contrast)
         sec_light.add("Tươi sáng", self.sl_tone, "tong")
         sec_light.add("", self.cb_lowlight, "retinex toi")
+        sec_light.add("Tông mẫu", self.look_box, "tong mau trong sang look anh the da sang")
+        sec_light.add("Độ mạnh tông mẫu", self.sl_look, "tong mau trong sang look")
         sec_color = Section("Màu sắc", on_reset=lambda: self._reset_fields("wb", "color"))
         sec_color.add("Máy chụp", self.phone, "dien thoai exif hang")
         sec_color.add("", self.phone_info)
@@ -1850,6 +1930,10 @@ class MainWindow(QMainWindow):
         self.btn_damage.clicked.connect(self._draw_damage)
         self.btn_damage2.clicked.connect(self._draw_damage)
         self.cb_keep_lips.toggled.connect(self._to_custom)
+        self.cb_deshine.toggled.connect(self._deshine_toggled)
+        self.cb_deshine2.toggled.connect(self._deshine_toggled)
+        self.look_box.currentIndexChanged.connect(lambda i: self._look_picked(self.look_box, i))
+        self.look_box2.currentIndexChanged.connect(lambda i: self._look_picked(self.look_box2, i))
         self.cb_lowlight.toggled.connect(lambda on: self.sl_expo.setEnabled(not on))
         self._sync_simple()
 
@@ -2050,6 +2134,7 @@ class MainWindow(QMainWindow):
         if got:
             self.preset_lib.set_active(got[0].id)
         self._fill_preset_sets()
+        self._fill_looks()
         msg = "Đã nạp và chọn: " + ", ".join(st.name for st in got)
         if warn:
             msg += "\n\nĐã tự sửa:\n" + "\n".join(warn[:12])
@@ -2112,8 +2197,79 @@ class MainWindow(QMainWindow):
     def _manage_presets(self):
         PresetDialog(self, self.preset_lib).exec()
         self._fill_preset_sets()
+        self._fill_looks()
+
+    # ----- tông mẫu -----
+
+    def _fill_looks(self, keep: str | None = None):
+        """Ô chọn tông mẫu: Giữ tông ảnh + các bộ preset có kèm tông mẫu (có sẵn hoặc nạp từ file)."""
+        if keep is None:
+            keep = self.look_box.currentData() or ""
+        for box in (self.look_box, self.look_box2):
+            box.blockSignals(True)
+            box.clear()
+            box.addItem("Giữ tông ảnh", "")
+            for st in self.preset_lib.looks():
+                name = (st.look or {}).get("name") or st.name
+                box.addItem(name if st.builtin else f"{name} ({st.name})", st.id)
+            box.setCurrentIndex(max(0, box.findData(keep)))
+            box.blockSignals(False)
+        self.sl_look.setEnabled(bool(self.look_box.currentData()))
+
+    def _look_picked(self, box, i: int):
+        sid = box.itemData(i) or ""
+        for b in (self.look_box, self.look_box2):
+            if b is not box:
+                b.blockSignals(True)
+                b.setCurrentIndex(max(0, b.findData(sid)))
+                b.blockSignals(False)
+        self.sl_look.setEnabled(bool(sid))
+        self.say("Tông mẫu: " + (box.itemText(i) if sid else "tắt (giữ tông ảnh)"))
+
+    def _look_value(self) -> dict | None:
+        sid = self.look_box.currentData()
+        if not sid:
+            return None
+        st = self.preset_lib.get(sid)
+        return dict(st.look) if st.look else None
+
+    def _set_look(self, look: dict | None, amount: float):
+        """Đặt ô Tông mẫu theo Settings (lịch sử, đặt lại): tìm bộ có đúng tông đó; không thấy thì giữ lựa chọn."""
+        sid = ""
+        if look:
+            sid = next((st.id for st in self.preset_lib.looks() if st.look == look), self.look_box.currentData() or "")
+        for b in (self.look_box, self.look_box2):
+            b.blockSignals(True)
+            b.setCurrentIndex(max(0, b.findData(sid)))
+            b.blockSignals(False)
+        self.sl_look.set(amount)
+        self.sl_look.setEnabled(bool(sid))
+
+    def _user_opts(self) -> dict:
+        """Tuỳ chọn người dùng giữ qua mọi đổi loại ảnh, mức nét, preset, mở ảnh mới: khử bóng da, tông mẫu."""
+        return dict(deshine=self._deshine_value(), look=self._look_value(), look_amount=self.sl_look.value())
 
     # ----- thông số <-> giao diện -----
+
+    def _deshine_value(self) -> float:
+        return self.sl_deshine.value() if self.cb_deshine.isChecked() else 0.0
+
+    def _set_deshine(self, v: float):
+        """Đặt ô Khử bóng da (cả hai chế độ) và thanh cường độ theo Settings.deshine. Tắt thì thanh giữ giá trị cũ."""
+        on = v > 1e-3
+        for cb in (self.cb_deshine, self.cb_deshine2):
+            cb.blockSignals(True)
+            cb.setChecked(on)
+            cb.blockSignals(False)
+        if on:
+            self.sl_deshine.set(v)
+        self.sl_deshine.setEnabled(on)
+
+    def _deshine_toggled(self, on: bool):
+        if on and self.sl_deshine.value() <= 1e-3:
+            self.sl_deshine.set(DESHINE_DEFAULT)
+        self._set_deshine(self.sl_deshine.value() if on else 0.0)
+        self.say("Khử bóng loáng da: " + (f"bật ({self.sl_deshine.value() * 100:.0f} %)" if on else "tắt"))
 
     def _apply_settings(self, s: Settings):
         widgets = (self.mode, self.preset, self.scale, self.cb_denoise_auto, self.cb_lowlight, self.face_model,
@@ -2145,6 +2301,8 @@ class MainWindow(QMainWindow):
         self.sl_skin.set(prof.skin if s.skin_tone < 0 else s.skin_tone)
         self.sl_color.set(s.color)
         self.sl_gloss.set(s.gloss)
+        self._set_deshine(s.deshine)
+        self._set_look(s.look, s.look_amount)
         self.face_model.setCurrentIndex(max(0, self.face_model.findData(s.face_model)))
         self.bg_model.setCurrentIndex(max(0, self.bg_model.findData(s.sr_model)))
         for w in widgets:
@@ -2159,7 +2317,7 @@ class MainWindow(QMainWindow):
                         contrast=self.sl_contrast.value(), brightness=self.sl_bright.value(),
                         low_light=self.cb_lowlight.isChecked(), exposure=self.sl_expo.value(),
                         tone=self.sl_tone.value(), fidelity=self.sl_fid.value(),
-                        color=self.sl_color.value(), gloss=self.sl_gloss.value(),
+                        color=self.sl_color.value(), gloss=self.sl_gloss.value(), **self._user_opts(),
                         face_model=self.face_model.currentData(), phone=self._phone_key(),
                         wb=self.sl_wb.value(), skin_tone=self.sl_skin.value(), sr_model=self.bg_model.currentData(),
                         detail_fidelity=None if self.cb_detail_same.isChecked() else self.sl_detail.value(),
@@ -2247,7 +2405,7 @@ class MainWindow(QMainWindow):
                 box.blockSignals(True)
                 box.setCurrentIndex(max(0, box.findData(default)))
                 box.blockSignals(False)
-        s = level_settings(n, self._auto_base(), self.analysis)
+        s = level_settings(n, self._auto_base(), self.analysis).with_(**self._user_opts())
         self._apply_settings(s)
         self.preset.blockSignals(True)
         self.preset.setCurrentIndex(self.preset.findData("custom"))
@@ -2381,7 +2539,7 @@ class MainWindow(QMainWindow):
             s = apply_preset(base, key)
         s = s.with_(face_model=self.face_model.currentData(), sr_model=self.bg_model.currentData(),
                     subject=self.subject.currentData(), keep_lips=self.cb_keep_lips.isChecked(),
-                    bg_color=self.bg_color if self.cb_bg.isChecked() else None)
+                    bg_color=self.bg_color if self.cb_bg.isChecked() else None, **self._user_opts())
         self._apply_settings(s)
         self.level_choice = None
         # Tự động: mức theo độ mờ đo được (auto_level), không suy ngược từ thông số
@@ -2395,7 +2553,8 @@ class MainWindow(QMainWindow):
             self._preset_changed()
         else:
             self._apply_settings(Settings(mode=self.mode.currentData(), upscale=self.scale.currentData(),
-                                          face_model=self.face_model.currentData(), sr_model=self.bg_model.currentData()))
+                                          face_model=self.face_model.currentData(), sr_model=self.bg_model.currentData(),
+                                          **self._user_opts()))
 
     # ----- trạng thái -----
 
@@ -2566,7 +2725,8 @@ class MainWindow(QMainWindow):
         self.preset.setCurrentIndex(self.preset.findData("auto"))
         self.preset.blockSignals(False)
         s = s.with_(face_model=self.face_model.currentData(), sr_model=self.bg_model.currentData(),
-                    subject=self.subject.currentData(), keep_lips=self.cb_keep_lips.isChecked())
+                    subject=self.subject.currentData(), keep_lips=self.cb_keep_lips.isChecked(),
+                    **self._user_opts())  # khử bóng, tông mẫu là tuỳ chọn của người dùng: mở ảnh mới vẫn giữ
         self._apply_settings(s)
         self.level_choice = None
         self._show_level(auto_level(a)[0], s)
@@ -2709,7 +2869,8 @@ class MainWindow(QMainWindow):
                         an = eng.analyze(img, with_faces=eng.models_ready())
                         base = Settings(upscale=s.upscale, face_model=s.face_model, sr_model=s.sr_model,
                                         phone=s.phone, wb=s.wb, skin_tone=s.skin_tone, subject=s.subject,
-                                        face_styles=s.face_styles, keep_lips=s.keep_lips, bg_color=s.bg_color)
+                                        face_styles=s.face_styles, keep_lips=s.keep_lips, bg_color=s.bg_color,
+                                        deshine=s.deshine, look=s.look, look_amount=s.look_amount)
                         si = recommend(an, base)[1]
                         if level:
                             si = level_settings(level, si.with_(upscale=s.upscale), an)

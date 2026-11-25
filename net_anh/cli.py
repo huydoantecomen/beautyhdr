@@ -36,6 +36,8 @@ def _preset_styles(a) -> dict | None:
         if not sets:
             raise facestyle.PresetError(f"không có bộ preset “{a.preset_set}”")
     a._styles = facestyle.styles_to_settings(sets[0])
+    # tông mẫu của bộ: chỉ dùng khi chọn bộ rõ ràng (--preset-file / --preset-set); --look ghi đè
+    a._look = sets[0].look if (a.preset_file or a.preset_set) else None
     print(f"Bộ preset: {sets[0].name}", file=sys.stderr)
     return a._styles
 
@@ -60,7 +62,7 @@ def build_settings(a, eng: Enhancer | None, img) -> tuple[Settings, str]:
     if a.mode != "auto":
         s = s.with_(mode=a.mode)
     for k in ("strength", "sharpness", "denoise", "contrast", "brightness", "fidelity", "color", "gloss", "face_model",
-              "wb", "skin_tone", "exposure", "tone"):
+              "wb", "skin_tone", "exposure", "tone", "deshine"):
         v = getattr(a, k)
         if v is not None:
             s = s.with_(**{k: v})
@@ -77,6 +79,13 @@ def build_settings(a, eng: Enhancer | None, img) -> tuple[Settings, str]:
         s = s.with_(keep_lips=False)
     s = s.with_(subject=getattr(a, "subject", "auto"), face_styles=getattr(a, "_styles", None),
                 bg_color=getattr(a, "bg_color", None) or None)
+    lk = getattr(a, "_look", None)
+    if getattr(a, "look", None):
+        from .look import LOOKS
+        lk = None if a.look == "off" else LOOKS[a.look].to_dict()
+    s = s.with_(look=lk)
+    if getattr(a, "look_amount", None) is not None:
+        s = s.with_(look_amount=float(min(max(a.look_amount, 0.0), 1.0)))
     return s, note
 
 
@@ -115,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--skin-tone", type=float, help="sửa da đỏ/vàng 0..1 (mặc định theo hãng)")
     p.add_argument("--color", type=float, help="0..1 tăng màu (cân bằng trắng, độ rực, rõ khối)")
     p.add_argument("--gloss", type=float, help="0..1 độ bóng da")
+    p.add_argument("--deshine", type=float, help="0..1 khử bóng loáng da (da dầu bóng ở trán, mũi, má); mặc định tắt")
     p.add_argument("--level", type=int, choices=list(LEVELS),
                    help="mức nét cần: 1 Nhẹ, 2 Vừa … 5 Tối đa (kiểu Remini), 6 Cao nhất (model mới nhất, nặng nhất: "
                         "RestoreFormer++, DAT-2); chế độ theo nội dung từng ảnh")
@@ -146,6 +156,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="preset theo đối tượng: auto = đoán tuổi, giới tính từng mặt; hoặc ép một nhóm; off = tắt")
     p.add_argument("--bg-color", help="đổi màu nền đồng màu (ảnh thẻ, phông trơn): #RRGGBB hoặc trang, xanh, xanh-nhat, do, xam")
     p.add_argument("--preset-file", help="bộ preset (.netanh.json) dùng cho lần chạy này (mặc định: bộ đang dùng)")
+    p.add_argument("--look", choices=["trong_sang", "da_dep_the", "off"],
+                   help="tông mẫu: trong_sang = da sáng trong, ít vàng đỏ, môi tươi, tóc đen, nền phẳng (ảnh thẻ); "
+                        "off = tắt. Mặc định: theo bộ preset chọn bằng --preset-file/--preset-set, không có thì tắt")
+    p.add_argument("--look-amount", type=float, help="0..1 độ mạnh tông mẫu (mặc định 1)")
     p.add_argument("--preset-set", help="tên hoặc mã bộ preset trong file / thư viện (mặc định bộ đầu / bộ đang dùng)")
     a = p.parse_args(argv)
     if a.bg_color:

@@ -180,3 +180,12 @@ def test_parse_extra_restore_bg_subject_styles():
                 {"styles": "x" * 9000}):
         with pytest.raises(S.ApiError):
             S.parse_extra(bad)
+
+
+def test_parse_extra_deshine():
+    from net_anh import server as S
+    assert S.parse_extra({"deshine": "0.6"}) == {"deshine": 0.6}
+    assert "deshine" in S.FEATURES
+    for bad in ("abc", "1.5", "-0.1"):
+        with pytest.raises(S.ApiError):
+            S.parse_extra({"deshine": bad})

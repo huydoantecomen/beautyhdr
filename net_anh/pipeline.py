@@ -53,6 +53,7 @@ class Report:
     subjects: list[str] = field(default_factory=list)  # đối tượng từng mặt đã áp preset, vd "Nữ (~27 tuổi)"
     styled: bool = False  # đã áp preset đối tượng lên mặt
     bg_model: str = ""  # model nền thật sự đã chạy, kèm kiểu số trên GPU
+    deshined: int = 0  # số mặt đã khử bóng da
 
     def models(self) -> str:
         parts = []
@@ -551,6 +552,108 @@ class Enhancer:
             rep.styled = True
         return np.clip(acc + 0.5, 0, 255).astype(np.uint8) if rep.styled else out
 
+    @torch.no_grad()
+    def _deshine(self, out: np.ndarray, s: Settings, rep: "Report") -> np.ndarray:
+        """Khử bóng loáng da (deshine.py) trên ảnh ra: dò mặt, căn, tách vùng da bằng ParseNet, đưa mặt nạ da về ảnh rồi
+        khử bóng ngay trên điểm ảnh của ảnh ra (giữ nguyên vân da ở độ phân giải thật, không qua căn và ghép ngược).
+        Cường độ từng mặt = thanh Khử bóng chung + nút "Khử bóng" của preset đối tượng (−1..1)."""
+        from . import deshine, facestyle
+        if not all(weights.status(m) == "ready" for m in ("retinaface", "parsenet")):
+            rep.notes.append("Khử bóng da cần model tìm và tách vùng mặt (chưa tải): bỏ qua")
+            return out
+        helper = self._load_helper(1)
+        helper.read_image(out)
+        helper.get_face_landmarks_5(only_center_face=False, resize=640, eye_dist_threshold=5)
+        faces = [Face(np.asarray(b), np.asarray(l)) for b, l in zip(helper.det_faces, helper.all_landmarks_5)]
+        if not faces:
+            return out
+        select_faces(faces, s.max_faces)
+        keep = [i for i, f in enumerate(faces) if f.ok and f.width >= MIN_FACE_PX]
+        if not keep:
+            return out
+        helper.det_faces = [helper.det_faces[i] for i in keep]
+        helper.all_landmarks_5 = [helper.all_landmarks_5[i] for i in keep]
+        styles = facestyle.styles_from_settings(s.face_styles)
+        if s.subject != "off" and any(abs(st.matte) > 1e-3 for st in styles.values()):
+            subj = self._subjects(out, helper.all_landmarks_5, s, Report())  # nhãn đối tượng đã ghi ở bước mặt
+        else:
+            subj = [None] * len(keep)
+        helper.align_warp_face()
+        helper.get_inverse_affine(None)
+        h, w = out.shape[:2]
+        n_done, frac = 0, []
+        for face, inv, box, sb in zip(helper.cropped_faces, helper.inverse_affine_matrices, helper.det_faces, subj):
+            self._check()
+            st = styles.get(sb) if sb else None
+            amount = float(np.clip(s.deshine + (st.matte if st else 0.0), 0, 1))
+            if amount <= 1e-3:
+                continue
+            m512 = deshine.skin_mask512(self._parse(helper, face))
+            m = np.zeros((h, w), np.float32)
+            corners = np.array([[0, 0, 1], [512, 0, 1], [0, 512, 1], [512, 512, 1]], np.float32) @ inv.T
+            x0, y0 = np.maximum(np.floor(corners.min(0)).astype(int), 0)
+            x1, y1 = np.minimum(np.ceil(corners.max(0)).astype(int) + 1, (w, h))
+            if x1 <= x0 or y1 <= y0:
+                continue
+            sh = inv.copy()
+            sh[:, 2] -= (x0, y0)  # chỉ đưa mặt nạ về khung quanh mặt (ảnh ra có thể rất lớn)
+            m[y0:y1, x0:x1] = np.clip(cv2.warpAffine(m512, sh, (x1 - x0, y1 - y0), flags=cv2.INTER_LINEAR), 0, 1)
+            fw = float(box[2] - box[0])
+            st_ = {}
+            out = deshine.remove_shine(out, m, amount, fw, st_)
+            frac.append(st_.get("shine", 0.0))
+            n_done += 1
+        if n_done:
+            rep.deshined = n_done
+            rep.notes.append(f"Khử bóng da {n_done} khuôn mặt (vùng bóng ~{max(frac) * 100:.0f} % da mặt)")
+        return out
+
+    def _look(self, out: np.ndarray, s: Settings, rep: "Report") -> np.ndarray:
+        """Tông mẫu (look.py): mặt nạ da, môi, tóc từ ParseNet của từng mặt (gộp lại cỡ ảnh ra), rồi look.apply."""
+        from . import look as lookmod
+        lk = lookmod.Look.from_dict(s.look)
+        if not all(weights.status(m) == "ready" for m in ("retinaface", "parsenet")):
+            rep.notes.append("Tông mẫu cần model tìm và tách vùng mặt (chưa tải): bỏ qua")
+            return out
+        helper = self._load_helper(1)
+        helper.read_image(out)
+        helper.get_face_landmarks_5(only_center_face=False, resize=640, eye_dist_threshold=5)
+        faces = [Face(np.asarray(b), np.asarray(l)) for b, l in zip(helper.det_faces, helper.all_landmarks_5)]
+        if not faces:
+            rep.notes.append("Tông mẫu: không thấy khuôn mặt, giữ tông ảnh")
+            return out
+        select_faces(faces, s.max_faces)
+        keep = [i for i, f in enumerate(faces) if f.ok and f.width >= MIN_FACE_PX]
+        if not keep:
+            return out
+        helper.det_faces = [helper.det_faces[i] for i in keep]
+        helper.all_landmarks_5 = [helper.all_landmarks_5[i] for i in keep]
+        helper.align_warp_face()
+        helper.get_inverse_affine(None)
+        h, w = out.shape[:2]
+        acc = {k: np.zeros((h, w), np.float32) for k in ("core", "skin", "lips", "hair")}
+        for face, inv in zip(helper.cropped_faces, helper.inverse_affine_matrices):
+            self._check()
+            m512 = lookmod.masks_from_labels(self._parse(helper, face))
+            m512.core[:10], m512.core[-10:], m512.core[:, :10], m512.core[:, -10:] = 0, 0, 0, 0
+            corners = np.array([[0, 0, 1], [512, 0, 1], [0, 512, 1], [512, 512, 1]], np.float32) @ inv.T
+            x0, y0 = np.maximum(np.floor(corners.min(0)).astype(int), 0)
+            x1, y1 = np.minimum(np.ceil(corners.max(0)).astype(int) + 1, (w, h))
+            if x1 <= x0 or y1 <= y0:
+                continue
+            sh = inv.copy()
+            sh[:, 2] -= (x0, y0)
+            for k in acc:
+                part = cv2.warpAffine(getattr(m512, k), sh, (x1 - x0, y1 - y0), flags=cv2.INTER_LINEAR)
+                np.maximum(acc[k][y0:y1, x0:x1], np.clip(part, 0, 1), out=acc[k][y0:y1, x0:x1])
+        acc["core"] = (acc["core"] > 0.5).astype(np.float32)
+        out, info = lookmod.apply(out, lookmod.Masks(**acc), lk, s.look_amount)
+        if "da_truoc" in info:
+            (l0, a0, b0), (l1, a1, b1) = info["da_truoc"], info["da_sau"]
+            rep.notes.append(f"Tông mẫu {lk.name}: da L {l0:.0f}→{l1:.0f}, đỏ {a0:.0f}→{a1:.0f}, vàng {b0:.0f}→{b1:.0f}"
+                             + (", " + info["nen"] if "nen" in info else ""))
+        return out
+
     def _sharp_contour(self, helper, ai: np.ndarray, blended: np.ndarray) -> np.ndarray:
         """Đường viền ngoài của mặt (má, quai hàm, cằm giáp tóc / nền / cổ) lấy CONTOUR_AI phần từ bản AI dù độ trung
         thực cao: trộn 70 % mặt gốc nhòe làm viền mặt nhòe theo ảnh gốc trong khi bên trong mặt đã nét. Viền là dải
@@ -851,6 +954,24 @@ class Enhancer:
             out, note = tone.bright_clear(out, s.tone, boxes, graphic)
             if note:
                 rep.notes.append(note)
+        if s.deshine > 0:  # sau tông tươi sáng: đo và khử đúng độ bóng của ảnh ra
+            self._check()
+            self.say("Đang khử bóng loáng da…")
+            try:
+                out = self._deshine(out, s, rep)
+            except (Cancelled, InterruptedError):
+                raise
+            except Exception as e:  # không để lỗi khử bóng làm mất cả kết quả
+                rep.notes.append(f"Không khử được bóng da ({e.__class__.__name__})")
+        if s.look and s.look_amount > 0:  # sau tông, khử bóng (đo màu da trên ảnh đã sáng), trước đổi nền
+            self._check()
+            self.say("Đang áp tông mẫu…")
+            try:
+                out = self._look(out, s, rep)
+            except (Cancelled, InterruptedError):
+                raise
+            except Exception as e:  # không để lỗi tông mẫu làm mất cả kết quả
+                rep.notes.append(f"Không áp được tông mẫu ({e.__class__.__name__})")
         if s.bg_color is not None:
             from . import backdrop
             try:

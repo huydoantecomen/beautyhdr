@@ -11,6 +11,8 @@ Kiểu mặt chỉ đổi vùng mặt (trên mặt đã căn 512×512, trước 
   glow    0..1   bóng da: ánh sáng loang nhẹ ở vùng da sáng
   bright  0..1   sáng da
   warm    −1..1  hồng hào (+) hoặc bớt đỏ, mát hơn (−)
+  matte   −1..1  khử bóng da: cộng vào thanh Khử bóng chung (vd nam da dầu +0,2); chỉ có tác dụng khi ô Khử bóng da
+                 được tích. Có từ định dạng 2; file định dạng 1 đọc vẫn được (matte = 0).
 Vùng da lấy từ ParseNet (da, mũi, tai), không đụng mắt, môi, tóc; chỉnh nhạt dần ra mép mặt để không lộ đường ghép.
 
 File chia sẻ: JSON UTF-8, đuôi .netanh.json, dùng chung cho bản PC và Android. Chỉ có số và chữ, không có mã chạy được;
@@ -29,8 +31,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .look import LOOKS, Look
+
 FORMAT = "net-anh-preset-set"
-VERSION = 1
+VERSION = 3  # 2: thêm nút matte (khử bóng da); 3: bộ có thể kèm tông mẫu "look" (look.py). Đọc được file 1, 2
 EXT = ".netanh.json"
 MAX_FILE_BYTES = 512 * 1024
 MAX_SETS = 50
@@ -39,9 +43,9 @@ MAX_NAME = 60
 SUBJECT_KEYS = ("child", "man", "woman", "elder", "adult")
 # khoảng hợp lệ của từng nút chỉnh
 RANGES = {"keep": (0.0, 1.0), "detail": (-1.0, 1.0), "smooth": (0.0, 1.0), "glow": (0.0, 1.0), "bright": (0.0, 1.0),
-          "warm": (-1.0, 1.0)}
+          "warm": (-1.0, 1.0), "matte": (-1.0, 1.0)}
 KNOB_NAMES = {"keep": "Giữ nét thật", "detail": "Ngũ quan", "smooth": "Mịn da", "glow": "Bóng da", "bright": "Sáng da",
-              "warm": "Hồng hào"}
+              "warm": "Hồng hào", "matte": "Khử bóng"}
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,7 @@ class FaceStyle:
     glow: float = 0.0
     bright: float = 0.0
     warm: float = 0.0
+    matte: float = 0.0
 
     def is_neutral(self) -> bool:
         return all(abs(getattr(self, k)) < 1e-3 for k in RANGES)
@@ -79,16 +84,19 @@ class PresetSet:
     id: str = ""
     created: str = ""
     builtin: bool = False
+    look: dict | None = None  # tông mẫu kèm bộ (thông số look.Look, đã kẹp); None = bộ không có tông mẫu
 
     def style(self, subject: str) -> FaceStyle:
         return self.styles.get(subject) or self.styles.get("adult") or FaceStyle()
 
     def to_dict(self) -> dict:
         return {"id": self.id, "name": self.name, "author": self.author, "note": self.note, "created": self.created,
-                "styles": {k: self.styles[k].to_dict() for k in SUBJECT_KEYS if k in self.styles}}
+                "styles": {k: self.styles[k].to_dict() for k in SUBJECT_KEYS if k in self.styles},
+                **({"look": dict(self.look)} if self.look else {})}
 
     def copy(self, name: str | None = None) -> "PresetSet":
-        return PresetSet(name or self.name, dict(self.styles), self.author, self.note, new_id(), today(), False)
+        return PresetSet(name or self.name, dict(self.styles), self.author, self.note, new_id(), today(), False,
+                         dict(self.look) if self.look else None)
 
 
 def new_id() -> str:
@@ -103,14 +111,42 @@ def today() -> str:
 DEFAULT_SET = PresetSet(
     "Mặc định (Nét Ảnh)",
     {
-        "child": FaceStyle(keep=0.3, detail=0.0, smooth=0.35, glow=0.1, bright=0.2, warm=0.2),
-        "man": FaceStyle(keep=0.0, detail=0.2, smooth=0.1, glow=0.0, bright=0.1, warm=0.0),
+        "child": FaceStyle(keep=0.3, detail=0.0, smooth=0.35, glow=0.1, bright=0.2, warm=0.2, matte=-0.2),
+        "man": FaceStyle(keep=0.0, detail=0.2, smooth=0.1, glow=0.0, bright=0.1, warm=0.0, matte=0.1),
         "woman": FaceStyle(keep=0.0, detail=0.3, smooth=0.45, glow=0.3, bright=0.25, warm=0.2),
         "elder": FaceStyle(keep=0.35, detail=0.3, smooth=0.0, glow=0.0, bright=0.15, warm=0.1),
         "adult": FaceStyle(keep=0.0, detail=0.2, smooth=0.25, glow=0.1, bright=0.15, warm=0.1),
     },
     author="Nét Ảnh", note="Bộ preset có sẵn, đo trên ảnh mặt theo nhóm tuổi và giới tính.", id="default",
     created="2026-11-25", builtin=True)
+
+# Bộ "Trong sáng": kiểu mặt như bộ mặc định, kèm tông mẫu trong sáng (look.py, đo từ 4 ảnh thẻ mẫu huy gửi 2026-11-25).
+# Nữ, trẻ em mịn và sáng da thêm một chút như ảnh mẫu; khử bóng cộng thêm (chỉ khi ô Khử bóng da được tích).
+TRONG_SANG_SET = PresetSet(
+    "Trong sáng (ảnh thẻ)",
+    {**DEFAULT_SET.styles,
+     "woman": FaceStyle(keep=0.0, detail=0.3, smooth=0.55, glow=0.3, bright=0.3, warm=0.0, matte=0.2),
+     "child": FaceStyle(keep=0.3, detail=0.0, smooth=0.4, glow=0.1, bright=0.25, warm=0.1, matte=-0.1),
+     "adult": FaceStyle(keep=0.0, detail=0.2, smooth=0.3, glow=0.1, bright=0.2, warm=0.0, matte=0.1)},
+    author="Beauty HDR", note="Da sáng, trong, ít vàng đỏ; môi tươi; tóc đen; nền phẳng sạch. Kèm tông mẫu Trong sáng.",
+    id="trong-sang", created="2026-11-25", builtin=True, look=Look().to_dict())
+
+# Bộ "Da đẹp ảnh thẻ": như Trong sáng, kèm tông mẫu Da đẹp ảnh thẻ (làm sạch mụn, đốm, vết đỏ; đều màu) và mịn da hơn.
+DA_DEP_THE_SET = PresetSet(
+    "Da đẹp ảnh thẻ",
+    {**TRONG_SANG_SET.styles,
+     "woman": FaceStyle(keep=0.0, detail=0.3, smooth=0.65, glow=0.2, bright=0.3, warm=0.0, matte=0.3),
+     "man": FaceStyle(keep=0.0, detail=0.25, smooth=0.35, glow=0.0, bright=0.15, warm=0.0, matte=0.2),
+     "adult": FaceStyle(keep=0.0, detail=0.2, smooth=0.45, glow=0.1, bright=0.2, warm=0.0, matte=0.2)},
+    author="Beauty HDR", note="Da sạch như ảnh thẻ mẫu: bớt mụn, đốm sạm, vết đỏ; đều màu, giữ vân da. Kèm tông mẫu Da đẹp ảnh thẻ.",
+    id="da-dep-the", created="2026-11-25", builtin=True, look=LOOKS["da_dep_the"].to_dict())
+
+BUILTIN_SETS = (DEFAULT_SET, TRONG_SANG_SET, DA_DEP_THE_SET)
+BUILTIN_IDS = {s.id for s in BUILTIN_SETS}
+
+
+def builtin_sets() -> tuple[PresetSet, ...]:
+    return BUILTIN_SETS
 
 
 # ----------------------------------------------------------------- áp kiểu lên mặt đã căn 512×512
@@ -227,8 +263,14 @@ def parse_set(d: dict, warn: list[str]) -> PresetSet:
     sid = sid if isinstance(sid, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,40}", sid) else new_id()
     created = d.get("created")
     created = created if isinstance(created, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", created) else today()
+    look = None
+    if "look" in d and d["look"] is not None:
+        if isinstance(d["look"], dict):
+            look = Look.from_dict(d["look"], warn).to_dict()
+        else:
+            warn.append(f"{name}: tông mẫu không đúng dạng, bỏ qua")
     return PresetSet(name, styles, _clean_text(d.get("author"), MAX_NAME), _clean_text(d.get("note"), 300), sid,
-                     created, False)
+                     created, False, look)
 
 
 def loads(text: str | bytes) -> tuple[list[PresetSet], list[str]]:
@@ -309,7 +351,7 @@ class Library:
         return self.root / f"{sid}{EXT}"
 
     def sets(self) -> list[PresetSet]:
-        out = [DEFAULT_SET]
+        out = list(builtin_sets())
         for p in sorted(self.root.glob(f"*{EXT}")):
             try:
                 got, _ = load_file(p)
@@ -319,6 +361,10 @@ class Library:
             s.id = p.name[: -len(EXT)]
             out.append(s)
         return out
+
+    def looks(self) -> list[PresetSet]:
+        """Các bộ có kèm tông mẫu (cho ô chọn Tông mẫu)."""
+        return [s for s in self.sets() if s.look]
 
     def get(self, sid: str | None) -> PresetSet:
         for s in self.sets():
@@ -335,8 +381,8 @@ class Library:
         return s
 
     def delete(self, sid: str) -> None:
-        if sid == DEFAULT_SET.id:
-            raise PresetError("không xoá được bộ mặc định")
+        if sid in BUILTIN_IDS:
+            raise PresetError("không xoá được bộ có sẵn")
         self._path(sid).unlink(missing_ok=True)
         if self.active_id() == sid:
             self.set_active(DEFAULT_SET.id)
@@ -348,7 +394,7 @@ class Library:
         ids = {s.id for s in have}
         names = {s.name for s in have}
         for s in got:
-            if s.id in ids or s.id == DEFAULT_SET.id:
+            if s.id in ids or s.id in BUILTIN_IDS:
                 s.id = new_id()
             base, n = s.name, 2
             while s.name in names:
@@ -375,7 +421,7 @@ class Library:
             sid = (self.root / "active.txt").read_text(encoding="utf-8").strip()
         except OSError:
             return DEFAULT_SET.id
-        return sid if sid == DEFAULT_SET.id or self._path(sid).exists() else DEFAULT_SET.id
+        return sid if sid in BUILTIN_IDS or self._path(sid).exists() else DEFAULT_SET.id
 
     def set_active(self, sid: str) -> None:
         (self.root / "active.txt").write_text(sid, encoding="utf-8")
@@ -396,6 +442,6 @@ def styles_from_settings(d: dict | None) -> dict[str, FaceStyle]:
     return parse_set({"name": "x", "styles": d}, warn).styles
 
 
-__all__ = ["FaceStyle", "PresetSet", "Library", "DEFAULT_SET", "SUBJECT_KEYS", "RANGES", "KNOB_NAMES", "PresetError",
+__all__ = ["FaceStyle", "PresetSet", "Library", "DEFAULT_SET", "TRONG_SANG_SET", "DA_DEP_THE_SET", "BUILTIN_SETS", "SUBJECT_KEYS", "RANGES", "KNOB_NAMES", "PresetError",
            "apply", "skin_mask", "loads", "dumps", "load_file", "save_file", "safe_filename", "FORMAT", "VERSION", "EXT",
            "styles_to_settings", "styles_from_settings"]

@@ -57,6 +57,13 @@ class Settings:
     skin_tone: float = -1.0  # sửa da đỏ/vàng trong vùng mặt: −1 = theo hãng, 0 = tắt, 0..1
     color: float = 0.0  # 0..1: tăng màu (cân bằng trắng, độ rực, rõ khối), xem color.py
     gloss: float = 0.0  # 0..1: độ bóng da (mịn tầng thấp, giữ vân da, ánh bóng nhẹ)
+    # 0..1: khử bóng loáng da (deshine.py): giảm vệt sáng chói do da dầu ở trán, mũi, má, giữ vân da và khối mặt.
+    # 0 = tắt (mặc định; ô "Khử bóng da" trên giao diện). Không preset nào bật sẵn: người dùng tự chọn.
+    deshine: float = 0.0
+    # Tông mẫu (look.py): thông số look.Look dạng dict (từ bộ preset có tông mẫu, vd "Trong sáng (ảnh thẻ)"); None = tắt
+    # (mặc định). Đưa màu da, môi, tóc, vùng trắng, nền về gần tông của bộ ảnh mẫu. look_amount 0..1: độ mạnh chung.
+    look: dict | None = None
+    look_amount: float = 1.0
     # 0..1: tông tươi sáng, trong trẻo (tone.py): nâng tông giữa, bỏ lớp sương vùng tối, tăng độ rực, da sáng hơn.
     # Bật sẵn từ bản 0.7 vì huy thấy ảnh sau sửa u ám; 0 = giữ tông ảnh gốc.
     tone: float = 0.6

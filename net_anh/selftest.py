@@ -75,6 +75,17 @@ def tu_kiem(log_file: str | None = None, need_ai: bool = False) -> int:
         out, _ = eng.process(img, Settings(mode="quick", upscale=2))
         assert out.shape == (192, 256, 3), out.shape
         say(f"Cải thiện nhanh: đạt ({time.perf_counter() - t0:.2f} s)")
+        from . import deshine  # 0.13.0: khử bóng da (không cần model) chạy được trong bản đóng gói
+        m = np.zeros(img.shape[:2], np.float32)
+        m[20:80, 30:100] = 1.0
+        assert deshine.remove_shine(img, m, 0.6, 80).shape == img.shape
+        say("Khử bóng da: đạt")
+        from . import facestyle, look  # 0.14.0: tông mẫu Trong sáng chạy được trong bản đóng gói
+        lab = np.full(img.shape[:2], -1, np.int16)
+        lab[20:80, 30:100] = 1
+        assert look.apply(img, look.masks_from_labels(lab), look.Look())[0].shape == img.shape
+        assert facestyle.TRONG_SANG_SET.look
+        say("Tông mẫu Trong sáng: đạt")
 
         if eng.models_ready():
             t0 = time.perf_counter()

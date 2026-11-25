@@ -14,7 +14,8 @@ API phiên bản 1 (chi tiết: docs/API_MAY_CHU.md). Mọi câu trả lời l�
   GET    /api/v1/ping                 kiểm tra mã (token) còn hợp lệ
   POST   /api/v1/jobs?level=6&phone=auto&upscale=0&max_side=4096   thân = file ảnh → 202 {"id": ..., "position": n}
          tuỳ chọn (từ 0.10.2, info["features"]): restore=1 (khôi phục ảnh cũ: xoay, vá xước/bụi LaMa, màu phai),
-         bg=RRGGBB (đổi nền đồng màu), subject=auto|child|man|woman|elder|adult|off, styles=<JSON kiểu mặt của bộ preset>
+         bg=RRGGBB (đổi nền đồng màu), subject=auto|child|man|woman|elder|adult|off, styles=<JSON kiểu mặt của bộ preset>,
+         deshine=0..1 (từ 0.13.0: khử bóng loáng da)
   GET    /api/v1/jobs/<id>            {"state": queued|running|done|error|cancelled, "progress": "...", "report": {...}}
   GET    /api/v1/jobs/<id>/result     ảnh JPEG kết quả
   DELETE /api/v1/jobs/<id>            huỷ
@@ -57,7 +58,7 @@ MAX_QUEUE = 8  # việc chờ tối đa (cả đang chạy)
 KEEP_SECONDS = 15 * 60  # giữ kết quả để điện thoại lấy lại
 MAX_FAILS, LOCK_SECONDS = 5, 60
 LEVEL_NAMES = {"auto": "Tự động", 1: "Nhẹ", 2: "Vừa", 3: "Rõ", 4: "Rất rõ", 5: "Tối đa", 6: "Cao nhất"}
-FEATURES = ("restore", "bg", "subject", "styles")  # tham số thêm của POST /api/v1/jobs (từ 0.10.2)
+FEATURES = ("restore", "bg", "subject", "styles", "deshine")  # tham số thêm của POST /api/v1/jobs (từ 0.10.2; deshine từ 0.13.0)
 MAX_STYLES_CHARS = 8192
 IMAGE_EXT = {"image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png", "image/webp": ".webp",
              "image/bmp": ".bmp", "image/tiff": ".tif"}
@@ -232,6 +233,15 @@ def parse_extra(q: dict) -> dict:
         if len(t) != 6 or any(c not in "0123456789abcdef" for c in t):
             raise ApiError(400, "bad_bg", "bg phải là màu RRGGBB")
         extra["bg_color"] = (int(t[4:6], 16), int(t[2:4], 16), int(t[0:2], 16))  # B, G, R
+    ds = q.get("deshine", "")
+    if ds:  # khử bóng loáng da 0..1 (0 = tắt); bản Android cũ không gửi thì tắt như mặc định
+        try:
+            v = float(ds)
+        except ValueError:
+            raise ApiError(400, "bad_deshine", "deshine phải là số 0..1") from None
+        if not 0.0 <= v <= 1.0:
+            raise ApiError(400, "bad_deshine", "deshine phải là số 0..1")
+        extra["deshine"] = v
     subj = q.get("subject", "")
     if subj:
         if subj not in ("auto", "off") + facestyle.SUBJECT_KEYS:

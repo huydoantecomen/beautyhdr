@@ -1,5 +1,6 @@
 """Kiểm thử nhanh (không cần GPU). Các test cần model AI tự bỏ qua nếu model chưa tải."""
 import hashlib
+import json
 from pathlib import Path
 
 import cv2
@@ -924,7 +925,7 @@ def test_preset_file_roundtrip_and_validation(tmp_path):
 def test_preset_library_import_export(tmp_path):
     from net_anh import facestyle as fs
     lib = fs.Library(tmp_path / "lib")
-    assert [s.id for s in lib.sets()] == ["default"] and lib.active().builtin
+    assert [s.id for s in lib.sets()] == ["default", "trong-sang", "da-dep-the"] and lib.active().builtin
     with pytest.raises(fs.PresetError):
         lib.save(fs.DEFAULT_SET)
     mine = fs.DEFAULT_SET.copy("Của tôi")
@@ -1289,3 +1290,98 @@ def test_vietnamese_output_survives_cp1252_console(tmp_path):
     out = r.stdout.decode("utf-8", "replace")
     assert "UnicodeEncodeError" not in r.stderr.decode("utf-8", "replace")
     assert r.returncode == 2 and "Không mở được cổng" in out, (r.returncode, out, r.stderr[-300:])
+# ---------- khử bóng loáng da (0.13.0) ----------
+
+def _oily_face(h=320, w=260, seed=3):
+    """Mảng da (màu da châu Á, có vân) với vệt bóng gần trắng ở giữa (trán/mũi) và một gò má sáng nhưng đủ màu."""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    lab = np.zeros((h, w, 3), np.float32)
+    lab[..., 0] = 62 + 6 * np.cos((xx - w / 2) / w * np.pi)  # khối mặt nhẹ
+    lab[..., 1], lab[..., 2] = 14.0, 18.0
+    tex = cv2.GaussianBlur(rng.standard_normal((h, w)).astype(np.float32), (0, 0), 1.0) * 4.0
+    lab[..., 0] += tex
+    spec = np.exp(-(((xx - 130) / 18) ** 2 + ((yy - 120) / 30) ** 2))  # vệt bóng dầu: sáng lên, nhạt màu
+    lab[..., 0] += 26 * spec
+    lab[..., 1] *= 1 - 0.7 * spec
+    lab[..., 2] *= 1 - 0.7 * spec
+    img = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    img = (np.clip(img, 0, 1) * 255 + 0.5).astype(np.uint8)
+    mask = np.zeros((h, w), np.float32)
+    cv2.ellipse(mask, (130, 160), (110, 150), 0, 0, 360, 1.0, -1)
+    return img, cv2.GaussianBlur(mask, (0, 0), 3), spec
+
+
+def test_deshine_reduces_shine_keeps_texture_and_outside():
+    from net_anh import deshine
+    img, m, spec = _oily_face()
+    out = deshine.remove_shine(img, m, 0.8, face_px=220)
+    lab0 = cv2.cvtColor(img.astype(np.float32) / 255, cv2.COLOR_BGR2LAB)
+    lab1 = cv2.cvtColor(out.astype(np.float32) / 255, cv2.COLOR_BGR2LAB)
+    hot = spec > 0.6
+    assert lab1[..., 0][hot].mean() < lab0[..., 0][hot].mean() - 8  # vệt bóng tối đi rõ
+    c0 = np.hypot(lab0[..., 1], lab0[..., 2])[hot].mean()
+    c1 = np.hypot(lab1[..., 1], lab1[..., 2])[hot].mean()
+    assert c1 > c0 + 2  # trả lại màu da
+    # vân da (tầng mịn) trong vùng bóng còn ≥ 60 %
+    hp = lambda L: L - cv2.GaussianBlur(L, (0, 0), 2.0)
+    assert hp(lab1[..., 0])[hot].std() > 0.6 * hp(lab0[..., 0])[hot].std()
+    # da không bóng gần như không đổi, ngoài mặt nạ giữ nguyên tuyệt đối
+    calm = (spec < 0.02) & (m > 0.99)
+    assert np.abs(lab1[..., 0][calm] - lab0[..., 0][calm]).mean() < 1.0
+    assert np.array_equal(out[m <= 0], img[m <= 0])
+    assert np.array_equal(deshine.remove_shine(img, m, 0.0, 220), img)
+    assert deshine.shine_fraction(img, m, 220) > deshine.shine_fraction(out, m, 220)
+
+
+def test_deshine_default_off_and_presets():
+    from net_anh.settings import PRESETS, Settings, apply_preset
+    assert Settings().deshine == 0.0
+    assert all(apply_preset(Settings(), k).deshine == 0.0 for k in PRESETS)
+
+
+def test_preset_file_matte_v2_and_reads_v1():
+    from net_anh import facestyle as fs
+    v1 = json.dumps({"format": fs.FORMAT, "version": 1, "sets": [
+        {"name": "cũ", "styles": {"woman": {"smooth": 0.4, "glow": 0.2}}}]})
+    sets, warn = fs.loads(v1)
+    assert sets[0].styles["woman"].matte == 0.0 and not warn
+    s = fs.PresetSet("mới", {"man": fs.FaceStyle(matte=0.3), "child": fs.FaceStyle(matte=-2)})
+    text = fs.dumps([s])
+    assert json.loads(text)["version"] == fs.VERSION
+    back, warn = fs.loads(text)
+    assert back[0].styles["man"].matte == pytest.approx(0.3)
+    assert back[0].styles["child"].matte == -1.0 and warn  # ngoài khoảng: kẹp và báo
+
+
+def test_gui_deshine_checkbox_shared(monkeypatch, tmp_path):
+    """0.13: ô Khử bóng da ở Đơn giản và Chuyên sâu là một thông số; đổi loại ảnh, mức nét không làm mất."""
+    pytest.importorskip("PySide6")
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from net_anh import gui
+    w = gui.MainWindow()
+    w.set_ui_mode("simple")
+    assert w.settings().deshine == 0.0 and not w.cb_deshine2.isChecked()
+    w.cb_deshine2.setChecked(True)
+    assert w.cb_deshine.isChecked() and w.settings().deshine == pytest.approx(gui.DESHINE_DEFAULT)
+    w._simple_pick(kind="portrait", power=4)
+    w._simple_pick(kind="auto", power="auto")
+    assert w.settings().deshine == pytest.approx(gui.DESHINE_DEFAULT)
+    w.set_ui_mode("pro")
+    assert w.sl_deshine.isEnabled()
+    w.sl_deshine.set(0.85)
+    assert w.settings().deshine == pytest.approx(0.85)
+    w.cb_deshine.setChecked(False)
+    assert w.settings().deshine == 0.0 and not w.cb_deshine2.isChecked() and not w.sl_deshine.isEnabled()
+    w.cb_deshine.setChecked(True)  # bật lại: nhớ cường độ cũ
+    assert w.settings().deshine == pytest.approx(0.85)
+    w._apply_settings(w.settings().with_(deshine=0.0))  # lịch sử, hoàn tác: theo đúng thông số đã lưu
+    assert not w.cb_deshine.isChecked()
+    w.search.setText("bóng dầu")
+    assert [sec.title for sec in w.sections if not sec.isHidden()] == ["Khuôn mặt"]
+    w.close()
+    app.processEvents()

@@ -1,4 +1,4 @@
-# Beauty HDR 0.13.1: phục hồi, làm nét, phóng to ảnh trên PC
+# Beauty HDR 0.14.0: phục hồi, làm nét, phóng to ảnh trên PC
 
 Phần mềm desktop chạy hoàn toàn trên máy: có GPU thì dùng GPU, không có thì dùng CPU. Ảnh không gửi đi đâu, ảnh gốc không bao giờ bị ghi đè.
 
@@ -171,6 +171,37 @@ có thì điện thoại tự xử lý trên máy. Mở **Beauty HDR - Máy ch�
 - .github/workflows/release-exe.yml: build gói app cpu + cuda, cắt phần dưới 1,9 GB, build BeautyHDR.exe, tạo update.json và
   đăng lên Releases. Kho phải công khai (UPDATE_REPO trong launcher hoặc biến BEAUTYHDR_REPO).
 - Cách cài cũ (TAO_FILE_CAI_DAT.bat, setup.exe, -CapNhat) vẫn còn trong mã nhưng không còn là cách phát hành.
+## Thay đổi ở 0.14.0 (tông mẫu Trong sáng, Da đẹp ảnh thẻ)
+
+- Đo 4 ảnh thẻ mẫu của huy bằng tools/look_stats.py (ParseNet tách da, môi, tóc, nền; Lab): da L ~74 a ~10 b ~13 (góc màu ~50°),
+  môi a ~33 b ~15, tóc đen trung tính (sắc độ 2–5), nền phẳng, dải sáng tối p5–p95 rộng (85–96), vân da ~2. Ảnh gốc của huy lệch:
+  da đỏ (a 15–19) hoặc vàng (b 28–30), tóc nâu đỏ, nền loang, ảnh mờ sương (p5–p95 52–67).
+- net_anh/look.py (không model): da lệch màu hằng số về đích (giữ vân), nâng sáng kiểu screen, đều màu; môi về hồng đỏ; tóc về đen;
+  vùng trắng về trắng hơi lạnh; kéo giãn dải sáng tối; làm phẳng nền đồng màu (không đụng viền tóc, người). Da đẹp ảnh thẻ thêm
+  làm sạch mụn, đốm sạm, vết đỏ ở tầng giữa (chỗ lệch lớn như lỗ mũi, mí mắt giữ nguyên) và làm đều vùng sạm rộng.
+- Settings.look (dict) và look_amount; mặc định tắt, không preset cũ nào đổi. Hai bộ preset có sẵn "Trong sáng (ảnh thẻ)" và
+  "Da đẹp ảnh thẻ" mang tông mẫu; file .netanh.json định dạng 3 có thêm khoá "look" (đọc được file 1, 2).
+- GUI: Đơn giản nhóm "Tuỳ chọn thêm" ô "Tông màu"; Chuyên sâu nhóm "Ánh sáng và tông" ô "Tông mẫu" + thanh "Độ mạnh tông mẫu".
+  Giữ khi đổi loại ảnh, mức nét, mở ảnh. CLI: --look trong_sang|da_dep_the|off, --look-amount, hoặc --preset-set trong-sang / da-dep-the.
+- Đo trên 2 ảnh gốc của huy (CPU, mức Tự động): da đỏ a 19 → 12–13, vàng b 28 → 16, tóc nâu đỏ → sắc độ 4–8, nền loang → phẳng.
+  Test: 121 qua. Chưa thử trên Windows thật, chưa có trên Android.
+
+## Thay đổi ở 0.13.0 (khử bóng loáng da)
+
+- Tuỳ chọn mới **Khử bóng da** (không bắt buộc, mặc định tắt): ô "Khử bóng loáng da" ở Đơn giản (nhóm Tuỳ chọn thêm) và
+  ô + thanh cường độ ở Chuyên sâu (nhóm Khuôn mặt). Hai ô là một thông số `Settings.deshine` (0 = tắt, tích lần đầu 60 %);
+  đổi loại ảnh, mức nét, mở ảnh mới không làm mất; lịch sử và hoàn tác nhớ đúng.
+- Thuật toán `net_anh/deshine.py` (không model, CPU): vùng da từ ParseNet (da mặt, mũi; không đụng mắt, mày, môi, tóc),
+  bản đồ bóng = vùng sáng hơn da xung quanh **và** nhạt màu hơn (ánh gương trắng), kéo tầng giữa về gần da nền (giữ 25 %
+  phần nhô để còn khối), trả màu da, xoá đốm bóng nhỏ ở chóp mũi, nhân trung; vân da gần như giữ nguyên; chỗ cháy sáng
+  được thêm lại chút vân. Chạy ở bước cuối (sau Tươi sáng, trước Đổi nền), ngay trên điểm ảnh của ảnh ra.
+- Đo trên ảnh chân dung da dầu của huy (Tự động, phóng 2×, CPU): vùng bóng 12,3 % → 7,9 % da mặt, sáng p99 của da
+  89,1 → 87,7, độ vân da (tầng σ 2 px) 0,29 → 0,29. Thêm ~1–2 s mỗi ảnh.
+- Preset theo đối tượng có thêm nút **Khử bóng** (−1..1, cộng vào thanh chung, chỉ khi ô được tích): bộ mặc định Nam +0,1,
+  Trẻ em −0,2. File `.netanh.json` lên định dạng 2; file định dạng 1 vẫn nạp được. Android 0.8/0.9 nạp file mới vẫn được
+  (báo bỏ qua "matte").
+- Dòng lệnh `--deshine 0..1`; máy chủ nhận `deshine=0..1` (`info.features` có "deshine").
+- Chưa chạy thử trên Windows thật.
 
 ## Thay đổi ở 0.12.2
 
