@@ -1,5 +1,7 @@
 @echo off
 chcp 65001 >nul
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
 cd /d "%~dp0"
 echo === Cai dat Net Anh ===
 where python >nul 2>nul || (echo Chua co Python. Cai Python 3.11 hoac 3.12 tu python.org, nho tick "Add to PATH". & pause & exit /b 1)

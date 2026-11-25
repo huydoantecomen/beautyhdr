@@ -18,6 +18,7 @@ if __name__ == "__main__":
             setattr(sys, name, open(os.devnull, "w", encoding="utf-8"))
 
     multiprocessing.freeze_support()
+    import net_anh  # noqa: F401  ép stdout/stderr sang UTF-8 (xem net_anh/__init__.py)
     from net_anh.selftest import dispatch
 
     code = dispatch(sys.argv[1:])

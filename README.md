@@ -1,4 +1,4 @@
-# Beauty HDR 0.13.0: phục hồi, làm nét, phóng to ảnh trên PC
+# Beauty HDR 0.13.1: phục hồi, làm nét, phóng to ảnh trên PC
 
 Phần mềm desktop chạy hoàn toàn trên máy: có GPU thì dùng GPU, không có thì dùng CPU. Ảnh không gửi đi đâu, ảnh gốc không bao giờ bị ghi đè.
 
@@ -152,6 +152,13 @@ Sửa ám vàng, đỏ của ảnh điện thoại và bộ lọc theo hãng (đ
 App Android bật **Chất lượng cao nhất** thì gửi ảnh tới PC này để xử lý bằng model nặng nhất trên GPU, máy chủ không
 có thì điện thoại tự xử lý trên máy. Mở **Beauty HDR - Máy chủ cho điện thoại** (menu Start), `may_chu.bat` hoặc
 `python -m net_anh.server`. Cài đặt, ghép nối, dùng ở ngoài qua Tailscale, API: [docs/MAY_CHU.md](docs/MAY_CHU.md).
+
+## Thay đổi ở 0.13.1
+
+- Sửa lỗi sập `UnicodeEncodeError: 'charmap' codec can't encode character` khi chạy `python app.py --may-chu` (và mọi lệnh in chữ Việt)
+  trên console Windows dùng cp1252: net_anh/__init__.py ép stdout/stderr sang UTF-8 (thay ký tự không hiện được bằng ?) ngay khi nạp gói,
+  phủ app.py, python -m net_anh.*, máy chủ, dòng lệnh; chay.bat, may_chu.bat, cai_dat.bat, dong_goi_exe.bat đặt thêm chcp 65001 và PYTHONUTF8=1.
+  Test tests/test_core.py::test_vietnamese_output_survives_cp1252_console chạy với PYTHONIOENCODING=cp1252.
 
 ## Thay đổi ở 0.13.0: một file exe duy nhất
 

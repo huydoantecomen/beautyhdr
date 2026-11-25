@@ -995,6 +995,7 @@ def test_pipeline_applies_subject_preset():
 def test_all_modules_compile():
     """0.8.1 bị lỗi cú pháp ở gui.py mà các test khác không nhập gui: biên dịch mọi file .py của app và công cụ."""
     import py_compile
+    import os
     root = Path(__file__).resolve().parents[1]
     for f in list((root / "net_anh").rglob("*.py")) + list((root / "tools").glob("*.py")) + [root / "app.py"]:
         py_compile.compile(str(f), doraise=True)
@@ -1253,3 +1254,38 @@ def test_progress_track_and_warnings():
     t.start(0)
     now[0] = 600.0
     assert "chưa có tiến triển" in t.warning()
+
+
+def test_vietnamese_output_survives_cp1252_console(tmp_path):
+    """0.13.1: console Windows cp1252 làm print chữ Việt sập app (UnicodeEncodeError). Chạy các lối vào thật với
+    PYTHONIOENCODING=cp1252 và không có PYTHONUTF8: không được sập, chữ Việt ra đúng UTF-8."""
+    import subprocess
+    import sys
+
+    import os
+    root = Path(__file__).resolve().parents[1]
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONUTF8",)}
+    env["PYTHONIOENCODING"] = "cp1252"
+    env["NET_ANH_WEIGHTS"] = str(tmp_path)
+    env["PYTHONPATH"] = str(root)
+    code = ("import net_anh,sys; print('Đã huỷ mọi điện thoại ủ ề ọ'); print('lỗi', file=sys.stderr); "
+            "from net_anh import server; "
+            "import io; from net_anh.selftest import dispatch; sys.exit(dispatch(['--tai-model','%s','--progress-file','%s']) if False else 0)"
+            % (tmp_path, tmp_path / "p.log"))
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, env=env, cwd=root)
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    assert "Đã huỷ mọi điện thoại ủ ề ọ" in r.stdout.decode("utf-8")
+    # máy chủ dòng lệnh: in thông báo tiếng Việt khi cổng bị chiếm, không sập vì mã hoá
+    import socket
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    port = s.getsockname()[1]
+    r = subprocess.run([sys.executable, str(root / "app.py"), "--may-chu", "--dong-lenh", "--host", "127.0.0.1",
+                        "--port", str(port), "--no-discovery"],
+                       capture_output=True, env=env, cwd=root, timeout=110)
+    s.close()
+    out = r.stdout.decode("utf-8", "replace")
+    assert "UnicodeEncodeError" not in r.stderr.decode("utf-8", "replace")
+    assert r.returncode == 2 and "Không mở được cổng" in out, (r.returncode, out, r.stderr[-300:])

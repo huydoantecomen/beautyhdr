@@ -1,5 +1,5 @@
 # Build bản Windows của Beauty HDR trên máy GitHub (windows-latest), tự kiểm, xuất bộ cài (một file setup.exe cho bản cpu).
-# Chạy tay: tab Actions → "Build Windows" → Run workflow. (Bộ cài setup.exe kiểu cũ; phát hành chính thức dùng workflow Release exe.)
+# Chạy tay: tab Actions → "Build Windows" → Run workflow. Đẩy tag v0.3.0 → tự build cả hai bản và đăng lên Releases.
 name: Build Windows
 
 on:
@@ -14,6 +14,8 @@ on:
         description: "Kèm model AI trong bộ cài (~620 MB)"
         default: true
         type: boolean
+  push:
+    tags: ["v*"]
 
 permissions:
   contents: write

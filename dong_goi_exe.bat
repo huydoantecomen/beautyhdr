@@ -1,5 +1,7 @@
 @echo off
 chcp 65001 >nul
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
 title Tao file cai dat Net Anh
 cd /d "%~dp0"
 rem Tao MOT file cai dat NetAnh-PHIENBAN-setup.exe ngay trong thu muc nay (tu cai Python, Inno Setup neu thieu).

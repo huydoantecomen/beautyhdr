@@ -149,7 +149,7 @@ def _nvidia_smi() -> list[Gpu]:
     try:
         flags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW: không bật cửa sổ đen
         out = subprocess.run([exe, "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=5, creationflags=flags).stdout
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5, creationflags=flags).stdout
     except Exception:
         return []
     gpus = []
