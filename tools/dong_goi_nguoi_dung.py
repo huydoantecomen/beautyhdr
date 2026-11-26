@@ -13,7 +13,8 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SKIP_DIRS = {"__pycache__", ".pytest_cache", ".venv", "_build", "build", "dist", "output", "weights", ".idea", ".vscode"}
+# net_anh_dev: bản nhà phát triển (xuất prompt cho AI ngoài), chỉ có trong gói Dev (net_anh_dev/dong_goi.py)
+SKIP_DIRS = {"net_anh_dev", "__pycache__", ".pytest_cache", ".venv", "_build", "build", "dist", "output", "weights", ".idea", ".vscode"}
 SKIP_SUFFIX = {".pyc", ".pth", ".onnx", ".csv", ".log", ".orig", ".rej"}
 
 

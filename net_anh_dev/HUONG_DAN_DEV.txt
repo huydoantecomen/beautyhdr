@@ -1,0 +1,23 @@
+Beauty HDR {ver} – BẢN NHÀ PHÁT TRIỂN (Dev)
+
+Bản này CHỈ dành cho nhà phát triển. Không gửi cho người dùng thường; các gói phát hành thường (PC Full, PC Cập nhật,
+Android Full, Android Cập nhật, exe tự tải) không có chức năng dưới đây.
+
+Chạy: bấm đúp CHAY_BAN_DEV.bat (lần đầu tự cài Python packages vào ma-nguon\.venv, cần Python 3.11–3.13).
+
+Chức năng thêm so với bản thường
+  Menu "Nhà phát triển" → "Bật xuất prompt cho AI ngoài" (mặc định TẮT; lần đầu bật phải đồng ý cảnh báo riêng tư).
+  Sau đó ở chế độ Chuyên sâu (Ctrl+2): Nhà phát triển → "Xuất prompt cho AI ngoài…" (Ctrl+Shift+P).
+  Cửa sổ tạo prompt theo đúng thông số đang chỉnh (mức nét, model, độ trung thực mặt, preset đối tượng, tông mẫu,
+  da, màu, ánh sáng, khôi phục ảnh cũ, đổi nền, cỡ ảnh ra) cho ChatGPT, Gemini, Grok hoặc dạng chung, tiếng Anh hoặc
+  tiếng Việt. Sửa tay được trước khi Sao chép; Xuất file .txt (prompt + ghi chú) hoặc .json (mọi hệ × ngôn ngữ kèm
+  thông số).
+  Dòng lệnh: ma-nguon\.venv\Scripts\python -m net_anh_dev prompt --preset max --level 5 --target grok --lang vi
+
+Riêng tư
+  Beauty HDR không tự gửi ảnh hay prompt đi đâu. Khi bạn tự gửi ảnh lên ChatGPT, Gemini, Grok…, ảnh khuôn mặt có thể
+  được lưu và dùng theo điều khoản của dịch vụ đó. Chỉ gửi khi người trong ảnh đồng ý; không gửi ảnh giấy tờ tuỳ thân.
+  Prompt không chứa tên file, EXIF, hãng máy hay vị trí.
+
+Giới hạn độ dài (ChatGPT 3500, Gemini 2500, Grok 900, chung 3000 ký tự) là mức app tự đặt cho prompt gọn, không phải
+giới hạn chính thức của từng dịch vụ. Quá dài thì ý phụ bị bỏ trước và được liệt kê.

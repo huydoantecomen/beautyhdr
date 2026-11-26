@@ -24,6 +24,8 @@ EXCLUDES = [
     "torch.utils.tensorboard", "triton",
     "PySide6.Qt3DCore", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtQuick",
     "PySide6.QtQml", "PySide6.QtMultimedia", "PySide6.QtCharts", "PySide6.QtDataVisualization",
+    # bản nhà phát triển (xuất prompt cho AI ngoài): KHÔNG BAO GIỜ vào exe thường (huy chốt 2026-11-26)
+    "net_anh_dev",
 ]
 
 
@@ -73,6 +75,9 @@ def _check_own_modules():
             continue
         if mod not in packed:
             errors.append(f"{mod}: không có trong gói")
+    dev = sorted(n for n in packed if n == "net_anh_dev" or n.startswith("net_anh_dev."))
+    if dev:
+        errors.append("gói nhà phát triển lọt vào bản thường: " + ", ".join(dev))
     if errors:
         raise SystemExit("Mã nguồn net_anh lỗi, dừng build:\n" + "\n".join(errors))
 

@@ -3179,7 +3179,8 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
 
-def main() -> int:
+def main(setup=None) -> int:
+    """setup(cửa_sổ): móc tuỳ chọn chạy sau khi dựng cửa sổ chính (bản thường không dùng)."""
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     from PySide6.QtCore import QSettings
@@ -3187,6 +3188,8 @@ def main() -> int:
     apply_style(app, pt)
     app.setWindowIcon(QIcon(str(ICON_PATH)))
     w = MainWindow()
+    if setup is not None:
+        setup(w)
     w.show()
     if len(sys.argv) > 1:
         w.open_path(sys.argv[1])
