@@ -308,6 +308,18 @@ def blend_strength(src: np.ndarray, out: np.ndarray, strength: float) -> np.ndar
     return cv2.addWeighted(out, strength, base, 1 - strength, 0)
 
 
+def _oom_classes() -> tuple[type, ...]:
+    out = [torch.cuda.OutOfMemoryError]
+    for mod in (torch, getattr(torch, "xpu", None)):
+        c = getattr(mod, "OutOfMemoryError", None)
+        if isinstance(c, type) and c not in out:
+            out.append(c)
+    return tuple(out)
+
+
+_OOM = _oom_classes()  # hết bộ nhớ GPU: CUDA, Intel XPU
+
+
 class Enhancer:
     """Giữ model trong bộ nhớ để xử lý nhiều ảnh liên tiếp. Không an toàn khi gọi song song."""
 
@@ -321,6 +333,32 @@ class Enhancer:
         self._helper = None
         self._agegender = None
         self._faces: list | None = None
+
+    def _empty_cache(self) -> None:
+        try:
+            if self.dev.kind == "cuda":
+                torch.cuda.empty_cache()
+            elif self.dev.kind == "xpu":
+                torch.xpu.empty_cache()
+        except Exception:
+            pass
+
+    def _fallback_to_cpu(self, why: Exception, rep: "Report") -> None:
+        """GPU không phải NVIDIA (Intel XPU, DirectML, Metal) lỗi lúc chạy: đưa mọi model về CPU, ghi nhớ cho các ảnh sau."""
+        from .device import pick_device
+
+        self._esrgan.clear()
+        self._sr_extra.clear()
+        self._gfpgan = self._helper = self._agegender = None
+        for attr in ("_restoreformer", "_restoreformer_pp"):
+            setattr(self, attr, None)
+        self._empty_cache()
+        self.dev = pick_device("cpu")
+        self.gpu_failed = True
+        rep.device = self.dev.name
+        rep.notes.append(f"GPU lỗi ({why.__class__.__name__}: {str(why)[:120]}): đã chạy lại bằng CPU, chậm hơn. "
+                         "Các ảnh sau cũng dùng CPU; mở lại app để thử GPU.")
+        self.say("GPU lỗi, chạy lại bằng CPU…")
 
     def _check(self):
         if self.cancel_requested():
@@ -860,8 +898,8 @@ class Enhancer:
             try:
                 out = self._esrgan_run(img, scale, tile, net, dtype, pad, label)
                 break
-            except torch.cuda.OutOfMemoryError:
-                torch.cuda.empty_cache()
+            except _OOM:
+                self._empty_cache()
                 if tile and tile <= 128:
                     raise
                 tile = 256 if not tile else tile // 2
@@ -925,7 +963,19 @@ class Enhancer:
         out = None
         if s.mode in ("portrait", "old", "upscale"):
             try:
-                out = self._process_ai(img, s, rep)
+                try:
+                    out = self._process_ai(img, s, rep)
+                except (Cancelled, InterruptedError):
+                    raise
+                except (RuntimeError, MemoryError) as e:
+                    if self.dev.kind in ("xpu", "directml", "mps") and not isinstance(e, weights.ModelError):
+                        self._fallback_to_cpu(e, rep)
+                        rep.faces_found = rep.faces_restored = rep.faces_kept = 0
+                        rep.face_model = rep.bg_model = ""
+                        rep.subjects, rep.styled = [], False
+                        out = self._process_ai(img, s, rep)
+                    else:
+                        raise
             except (Cancelled, InterruptedError):
                 raise
             except (weights.ModelError, OSError, RuntimeError, MemoryError) as e:

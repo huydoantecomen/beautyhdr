@@ -25,6 +25,30 @@ class Gpu:
     vram_gb: float  # 0 = không rõ
     usable: bool  # PyTorch bản đang cài chạy được trên GPU này
 
+    @property
+    def vendor(self) -> str:
+        n = self.name.lower()
+        if "nvidia" in n or "geforce" in n or "quadro" in n or "rtx" in n:
+            return "nvidia"
+        if "amd" in n or "radeon" in n or "ati " in n:
+            return "amd"
+        if "intel" in n or " arc" in n or "iris" in n or "uhd graphics" in n:
+            return "intel"
+        return "other"
+
+
+def advice(g: Gpu) -> str:
+    """Vì sao card này chưa dùng được và làm gì (hiện ở ô Thiết bị, cảnh báo và Quản lý model)."""
+    if g.vendor == "nvidia":
+        return (f"Máy có {g.name} nhưng bản đang cài chỉ chạy CPU. Mở lại BeautyHDR.exe và chọn bản GPU NVIDIA "
+                "để dùng card (giữ nguyên model).")
+    if g.vendor == "intel":
+        return (f"Máy có {g.name} nhưng bản đang cài chưa dùng được GPU Intel. Mở lại BeautyHDR.exe và chọn bản GPU Intel "
+                "(giữ nguyên model). Cần driver Intel Graphics mới.")
+    if g.vendor == "amd":
+        return (f"Máy có {g.name}: bản hiện tại chưa hỗ trợ card AMD nên chạy bằng CPU (đang nghiên cứu hỗ trợ sau).")
+    return f"Card {g.name} chưa dùng được cho AI, đang chạy bằng CPU."
+
 
 @dataclass(frozen=True)
 class Machine:
@@ -34,6 +58,13 @@ class Machine:
     ram_free_gb: float
     gpus: tuple[Gpu, ...]
     torch_cuda: bool  # PyTorch có CUDA (bản cài GPU NVIDIA)
+
+    @property
+    def unused_gpu(self) -> Gpu | None:
+        """Card đồ hoạ thật (NVIDIA, Intel, AMD) có trên máy nhưng chưa dùng được; ưu tiên NVIDIA rồi Intel."""
+        order = {"nvidia": 0, "intel": 1, "amd": 2, "other": 3}
+        cand = [g for g in self.gpus if not g.usable and g.vendor != "other"]
+        return min(cand, key=lambda g: order[g.vendor]) if cand else None
 
     @property
     def nvidia_unused(self) -> Gpu | None:
@@ -80,7 +111,7 @@ FACE_EXTRA_S = 1.8  # mỗi mặt, ngoài mạng mặt: tách vùng mắt, môi 
 DETECT_S = 0.35  # tìm mặt, một lần mỗi ảnh
 BASE_S = 0.5  # sửa màu, sáng trước khi vào mạng
 POST_S_PER_MP = 1.1  # ghép mặt, tông, màu trên ảnh ra: giây cho mỗi MP ảnh ra
-GPU_SPEEDUP = {"cuda": 25.0, "directml": 8.0, "mps": 8.0}  # ước lượng thô, xem đầu file
+GPU_SPEEDUP = {"cuda": 25.0, "xpu": 6.0, "directml": 8.0, "mps": 8.0}  # ước lượng thô, xem đầu file
 SLOW_SECONDS = 60  # ước tính chạy lâu hơn mức này thì cảnh báo
 
 
@@ -160,6 +191,41 @@ def _nvidia_smi() -> list[Gpu]:
     return gpus
 
 
+def parse_adapters(text: str) -> list[Gpu]:
+    """Đọc JSON của Get-CimInstance Win32_VideoController (Name, AdapterRAM); bỏ card ảo (Microsoft Basic, Remote)."""
+    import json
+
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    out: list[Gpu] = []
+    for d in data or []:
+        name = str(d.get("Name") or "").strip()
+        if not name or re.search(r"microsoft|remote|virtual|basic render|displaylink|parsec|meta", name, re.I):
+            continue
+        ram = d.get("AdapterRAM") or 0
+        vram = ram / 1024**3 if isinstance(ram, (int, float)) and 0 < ram < 2**32 - 2**20 else 0.0  # 4 GB bị cắt: coi là không rõ
+        out.append(Gpu(name, vram, False))
+    return out
+
+
+@functools.lru_cache(maxsize=1)
+def _windows_adapters() -> tuple[Gpu, ...]:
+    if sys.platform != "win32":
+        return ()
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command",
+                            "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+                           creationflags=0x08000000)
+        return tuple(parse_adapters(r.stdout))
+    except Exception:
+        return ()
+
+
 @functools.lru_cache(maxsize=1)
 def machine() -> Machine:
     gpus: list[Gpu] = []
@@ -176,8 +242,19 @@ def machine() -> Machine:
         gpus += [Gpu(torch_directml.device_name(i), 0.0, True) for i in range(torch_directml.device_count())]
     except Exception:
         pass
+    xpu = getattr(torch, "xpu", None)
+    try:
+        if xpu is not None and xpu.is_available():  # bản PyTorch XPU: Intel Arc, Iris Xe
+            for i in range(xpu.device_count()):
+                p = xpu.get_device_properties(i)
+                gpus.append(Gpu(p.name, getattr(p, "total_memory", 0) / 1024**3, True))
+    except Exception:
+        pass
     if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
         gpus.append(Gpu("Apple (Metal)", 0.0, True))
+    for g in _windows_adapters():  # card thật mà bản đang cài chưa dùng được: để báo lý do, không im lặng chạy CPU
+        if not any(g.name.lower() in u.name.lower() or u.name.lower() in g.name.lower() for u in gpus):
+            gpus.append(g)
     total, free = _ram()
     return Machine(_cpu_name(), os.cpu_count() or 1, total, free, tuple(gpus), cuda)
 
@@ -234,10 +311,9 @@ def warnings(sr_model: str, face_model: str | None, w: int, h: int, faces: int, 
                    + ("; muốn nhanh hãy chọn model nhẹ hơn." if lighter else "."))
     elif t >= 5 * SLOW_SECONDS:
         out.append(f"Ước tính khoảng {fmt_seconds(t)} cho ảnh này.")
-    g = m.nvidia_unused
+    g = m.unused_gpu
     if g is not None and kind == "cpu":
-        out.append(f"Máy có {g.name} nhưng bản Beauty HDR đang cài chỉ chạy CPU. Mở lại BeautyHDR.exe "
-                   "và chọn bản GPU để dùng card (giữ nguyên model).")
+        out.append(advice(g))
     if kind == "cuda":
         vram = max((x.vram_gb for x in m.gpus if x.usable), default=0)
         need = max((COST[x].vram_gb for x in models if x in COST), default=0)
@@ -251,4 +327,4 @@ def warnings(sr_model: str, face_model: str | None, w: int, h: int, faces: int, 
     return out
 
 
-__all__ = ["Gpu", "Machine", "Cost", "COST", "FACE_COSTS", "machine", "estimate", "warnings", "fmt_seconds"]
+__all__ = ["Gpu", "advice", "parse_adapters", "Machine", "Cost", "COST", "FACE_COSTS", "machine", "estimate", "warnings", "fmt_seconds"]

@@ -428,10 +428,9 @@ def machine_advice(m: hardware.Machine, kind: str) -> str:
     if kind != "cpu":
         return ("Có GPU nhưng bộ nhớ ít hoặc không rõ: model nặng vẫn chạy (app tự chia ô nhỏ), chậm hơn. "
                 "Model nhẹ (mặc định) nhanh.")
-    g = m.nvidia_unused
+    g = m.unused_gpu
     if g is not None:
-        return (f"Máy có {g.name} nhưng bản đang cài chỉ chạy CPU: mở lại BeautyHDR.exe và chọn bản GPU để model "
-                "nặng nhanh hơn nhiều lần. Model nhẹ (mặc định) vẫn chạy tốt trên CPU.")
+        return hardware.advice(g) + " Model nhẹ (mặc định) vẫn chạy tốt trên CPU."
     return ("Máy chỉ có CPU: model nhẹ (mặc định) vài giây đến vài chục giây mỗi ảnh; model nặng chọn được nhưng mất "
             "vài phút đến hơn chục phút mỗi ảnh tuỳ cỡ ảnh, app báo thời gian ước tính trước khi chạy.")
 
@@ -2438,11 +2437,10 @@ class MainWindow(QMainWindow):
             self.device.addItem(gpu.name + ("" if gpu.half else ", fp32"), "gpu")
             self._gpu_reason = ""
         else:
-            unused = hardware.machine().nvidia_unused
+            unused = hardware.machine().unused_gpu
             if unused is not None:
-                self._gpu_reason = (f"Máy có {unused.name} nhưng bản đang cài là bản chỉ chạy CPU. Mở lại "
-                                    "BeautyHDR.exe và chọn bản GPU để dùng card (giữ nguyên model).")
-                label = f"GPU {unused.name} (bản cài chỉ có CPU)"
+                self._gpu_reason = hardware.advice(unused)
+                label = f"GPU {unused.name} (chưa dùng được)"
             else:
                 self._gpu_reason = "Không thấy card đồ hoạ nào dùng được cho AI trên máy này."
                 label = "GPU (không có)"
@@ -2458,11 +2456,12 @@ class MainWindow(QMainWindow):
         gpu = next((d for d in self._devices if d.kind != "cpu"), None)
         use = gpu if (want != "cpu" and gpu is not None) else self._devices[-1]
         txt = "Đang dùng: " + use.name
-        self.dev_note.setText(txt + (". Bản cài chưa dùng được card: mở lại BeautyHDR.exe và chọn bản GPU."
-                                     if use.kind == "cpu" and "BeautyHDR.exe" in self._gpu_reason else ""))
-        self.dev_note.setToolTip(self._gpu_reason)
-        if use.kind == "cpu" and self._gpu_reason:
+        if use.kind == "cpu" and want == "cpu" and gpu is not None:
+            txt += " (bạn chọn CPU)"
+        elif use.kind == "cpu" and self._gpu_reason:
             txt += ". " + self._gpu_reason
+        self.dev_note.setText(txt)
+        self.dev_note.setToolTip(self._gpu_reason)
         self.dev_lbl.setText(("GPU" if use.kind != "cpu" else "CPU") + ": " + use.name.split(" (")[0].replace("GPU ", ""))
         self.dev_lbl.setToolTip(txt + "\nMáy: " + self.hw_text)
         self._update_hw_warn()

@@ -16,7 +16,7 @@
 # Chạy được trong đường dẫn có dấu tiếng Việt và dấu cách. Giữ file này ở dạng UTF-8 CÓ BOM: PowerShell 5.1 đọc
 # file không BOM theo bảng mã ANSI, chữ có dấu thành ký tự lạ và có thể làm hỏng cú pháp.
 param(
-    [ValidateSet("cpu", "cuda")] [string]$Flavor = "cpu",
+    [ValidateSet("cpu", "cuda", "xpu")] [string]$Flavor = "cpu",
     [switch]$NoModels,
     [switch]$NoInstaller,
     [string]$Python = "",  # ví dụ "py -3.12" hoặc "python"; để trống thì tự tìm
@@ -203,7 +203,8 @@ try {
         Write-Host "Model sẵn có: $nModel file trong $wdir (giữ nguyên, không tải lại)"
         if (-not $FlavorGiven) {
             $cuda = @(Get-ChildItem -LiteralPath (Join-Path $AppDir "_internal\torch\lib") -Filter "*cuda*.dll" -ErrorAction SilentlyContinue).Count -gt 0
-            $Flavor = if ($cuda) { "cuda" } else { "cpu" }
+            $xpuDll = @(Get-ChildItem -LiteralPath (Join-Path $AppDir "_internal\torch\lib") -Filter "*sycl*.dll" -ErrorAction SilentlyContinue).Count -gt 0
+            $Flavor = if ($cuda) { "cuda" } elseif ($xpuDll) { "xpu" } else { "cpu" }
             $Venv = Join-Path $Work "venv-$Flavor"
         }
         Write-Host "Bản đã cài: $Flavor"
@@ -232,7 +233,7 @@ try {
     }
 
     Step "2/6 Cài thư viện vào môi trường build riêng (_build\venv-$Flavor), không đụng tới Python đang dùng"
-    $TorchIndex = if ($Flavor -eq "cuda") { "https://download.pytorch.org/whl/cu128" } else { "https://download.pytorch.org/whl/cpu" }
+    $TorchIndex = switch ($Flavor) { "cuda" { "https://download.pytorch.org/whl/cu128" } "xpu" { "https://download.pytorch.org/whl/xpu" } default { "https://download.pytorch.org/whl/cpu" } }
     $keepTorch = $false
     if ($CapNhat) {
         & $Py (Join-Path $Root "packaging\kiem_torch.py")

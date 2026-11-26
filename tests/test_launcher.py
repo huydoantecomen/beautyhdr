@@ -179,20 +179,35 @@ def test_model_failure_is_reported_and_retried_next_launch(server, tmp_path, mon
     assert bl.State(tmp_path / "home").get("models_ok") is True
 
 
+def test_recommend_flavor_by_vendor():
+    r = bl.recommend_flavor
+    both = {"cpu", "cuda", "xpu"}
+    assert r(["NVIDIA GeForce GTX 1660 Ti", "Intel(R) UHD Graphics 630"], False, both) == ("cuda", "NVIDIA")
+    assert r([], True, both)[0] == "cuda"
+    assert r(["Intel(R) Arc(TM) A750 Graphics"], False, both)[0] == "xpu"
+    assert r(["Intel(R) Iris(R) Xe Graphics"], False, both)[0] == "xpu"
+    assert r(["Intel(R) UHD Graphics 630"], False, both)[0] == "cpu"  # đời cũ, chưa có hỗ trợ
+    assert r(["AMD Radeon RX 6600"], False, both) == ("cpu", "AMD")
+    assert r(["Intel(R) Arc(TM) A750 Graphics"], False, {"cpu"})[0] == "cpu"  # bản phát hành chưa có gói xpu
+    assert r(["NVIDIA GeForce RTX 3060"], False, {"cpu", "xpu"})[0] == "cpu"
+
+
 def test_offer_gpu_switch_keeps_models(server, tmp_path, monkeypatch):
     base, H = server
     monkeypatch.setenv("BEAUTYHDR_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("BEAUTYHDR_RETRY_SCALE", "0")
     upd = publish(base, H, "1.0.0")
     upd["flavors"]["cuda"] = upd["flavors"]["cpu"]
+    upd["flavors"]["xpu"] = upd["flavors"]["cpu"]
     H.files["/update.json"] = json.dumps(upd).encode()
+    monkeypatch.setattr(bl, "adapter_names", lambda: [])
     monkeypatch.setattr(bl, "has_nvidia", lambda: False)
     L = bl.Launcher(UI(), update_url=base + "/update.json", flavor="cpu")
     L.run(launch=False)
     assert L.state.get("flavor") == "cpu"
-    # lần sau máy có card: hỏi một lần, đồng ý thì chuyển sang cuda, model không tải lại
-    monkeypatch.setattr(bl, "has_nvidia", lambda: True)
-    ui = UI()
-    L2 = bl.Launcher(ui, update_url=base + "/update.json")
+    # lần sau máy có card Intel Arc: hỏi một lần, đồng ý thì chuyển sang xpu, model không tải lại
+    monkeypatch.setattr(bl, "adapter_names", lambda: ["Intel(R) Arc(TM) A750 Graphics"])
+    L2 = bl.Launcher(UI(), update_url=base + "/update.json")
     L2.run(launch=False)
-    assert L2.state.get("flavor") == "cuda" and L2.state.get("models_ok") is True
+    assert L2.state.get("flavor") == "xpu" and L2.state.get("models_ok") is True
+    assert "xpu" in L2.state.get("gpu_asked")

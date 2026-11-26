@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [cpu, cuda]
+        flavor: [cpu, cuda, xpu]
     env:
       PIP_NO_CACHE_DIR: "1"
       PYTHONUTF8: "1"
@@ -85,9 +85,5 @@ jobs:
           python tools/make_update_json.py "$VER" "${{ github.repository }}" meta > rel/update.json
           cat rel/update.json
           ls -la rel
-          # API GitHub thỉnh thoảng trả 502: thử lại từng bước, tải file lên từng cái một
-          retry() { for i in 1 2 3 4 5 6; do "$@" && return 0; echo "thử lại $i…"; sleep $((i * 10)); done; return 1; }
           gh release delete "v$VER" -y --cleanup-tag || true
-          retry gh release create "v$VER" --draft --title "Beauty HDR $VER" --notes "Tải BeautyHDR.exe và chạy: app và model tự tải về, mở lần sau tự cập nhật. Các file BeautyHDR-app-* là phần gói app, không cần tải tay."
-          for f in rel/*; do retry gh release upload "v$VER" "$f" --clobber; done
-          retry gh release edit "v$VER" --draft=false --latest
+          gh release create "v$VER" rel/* --title "Beauty HDR $VER" --notes "Tải BeautyHDR.exe và chạy: app và model tự tải về, mở lần sau tự cập nhật. Các file BeautyHDR-app-* là phần gói app, không cần tải tay."

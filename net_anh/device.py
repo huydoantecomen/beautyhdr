@@ -10,7 +10,7 @@ import torch
 class DeviceInfo:
     device: torch.device | object
     name: str
-    kind: str  # "cuda" | "directml" | "mps" | "cpu"
+    kind: str  # "cuda" | "xpu" | "directml" | "mps" | "cpu"
     half: bool  # dùng fp16 hay không
 
     def __str__(self) -> str:
@@ -38,6 +38,15 @@ def list_devices() -> list[DeviceInfo]:
             vram = props.total_memory / 1024**3
             found.append(DeviceInfo(torch.device(f"cuda:{i}"), f"GPU {props.name} ({vram:.1f} GB)", "cuda",
                                     fp16_ok(props.name)))
+    xpu = getattr(torch, "xpu", None)
+    try:  # Intel Arc, Iris Xe qua bản PyTorch XPU. fp32: chưa thử fp16 trên card Intel thật nên chọn đường chắc chắn
+        if xpu is not None and xpu.is_available():
+            for i in range(xpu.device_count()):
+                props = xpu.get_device_properties(i)
+                vram = getattr(props, "total_memory", 0) / 1024**3
+                found.append(DeviceInfo(torch.device(f"xpu:{i}"), f"GPU {props.name} ({vram:.1f} GB, Intel XPU)", "xpu", False))
+    except Exception:
+        pass
     try:  # GPU AMD / Intel trên Windows qua DirectML (tuỳ chọn: pip install torch-directml)
         import torch_directml  # type: ignore
 

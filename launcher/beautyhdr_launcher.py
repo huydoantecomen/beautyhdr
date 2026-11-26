@@ -51,6 +51,34 @@ def vtuple(v: str) -> tuple[int, ...]:
     return tuple(int(x) for x in re.findall(r"\d+", v))
 
 
+def adapter_names() -> list[str]:
+    """Tên các card đồ hoạ thật (bỏ card ảo) theo Windows; máy khác Windows thì rỗng."""
+    if os.name != "nt":
+        return []
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command",
+                            "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return []
+    bad = re.compile(r"microsoft|remote|virtual|basic render|displaylink|parsec", re.I)
+    return [ln.strip() for ln in r.stdout.splitlines() if ln.strip() and not bad.search(ln)]
+
+
+def recommend_flavor(names: list[str], nvidia_smi: bool, available: set[str]) -> tuple[str, str]:
+    """(gói nên tải, hãng card). Gói: cuda (NVIDIA), xpu (Intel Arc, Core Ultra, Iris Xe), cpu. UHD Graphics đời cũ và
+    card AMD chưa có gói GPU: dùng CPU. Gói không có trong bản phát hành thì rơi về cpu."""
+    low = [n.lower() for n in names]
+    if (nvidia_smi or any("nvidia" in n or "geforce" in n for n in low)) and "cuda" in available:
+        return "cuda", "NVIDIA"
+    if "xpu" in available and any(re.search(r"\barc\b|iris|ultra|intel\(r\) graphics$", n) for n in low):
+        return "xpu", "Intel"
+    if any("amd" in n or "radeon" in n for n in low):
+        return "cpu", "AMD"
+    return "cpu", ""
+
+
 def has_nvidia() -> bool:
     """Có card NVIDIA không (nvidia-smi có sẵn khi cài driver)."""
     for exe in ("nvidia-smi", r"C:\Windows\System32\nvidia-smi.exe"):
@@ -192,6 +220,7 @@ class Launcher:
         self.flavor_arg = flavor
         self.app_dir = self.home / "app"
         self.weights = self.home / "weights"
+        self._info: dict | None = None
 
     def cancel(self) -> bool:
         return self.ui.cancelled()
@@ -199,22 +228,37 @@ class Launcher:
     def installed(self) -> bool:
         return (self.app_dir / APP_EXE).exists() and bool(self.state.get("version"))
 
-    def choose_flavor(self) -> str:
-        if self.flavor_arg in ("cpu", "cuda"):
-            return self.flavor_arg
-        cur = self.state.get("flavor")
-        if cur:
-            return cur
-        if has_nvidia():
+    def ask_gpu(self, info: dict | None) -> str:
+        """Nhận diện card, hỏi một lần có cài bản GPU không. Trả cuda / xpu / cpu."""
+        avail = set(info["flavors"]) if info else {"cpu"}
+        flavor, vendor = recommend_flavor(adapter_names(), has_nvidia(), avail)
+        if flavor == "cuda":
             ok = self.ui.ask("Máy có card NVIDIA",
                              "Cài bản GPU NVIDIA (nhanh hơn khoảng 10 lần, nặng hơn khoảng 3 GB, chạy được cả bằng CPU)?\n"
                              "Chọn Không để cài bản CPU nhẹ.")
             return "cuda" if ok else "cpu"
+        if flavor == "xpu":
+            ok = self.ui.ask("Máy có card Intel",
+                             "Cài bản GPU Intel (Arc, Iris Xe)? Nhanh hơn CPU nhiều lần, nặng hơn khoảng 2 GB. "
+                             "Bản này chưa thử trên nhiều máy: nếu GPU lỗi, app tự chạy lại bằng CPU.\n"
+                             "Chọn Không để cài bản CPU nhẹ.")
+            return "xpu" if ok else "cpu"
+        if vendor == "AMD":
+            self.ui.log("Máy có card AMD: bản hiện tại chưa hỗ trợ GPU AMD, dùng CPU.")
         return "cpu"
+
+    def choose_flavor(self) -> str:
+        if self.flavor_arg in ("cpu", "cuda", "xpu"):
+            return self.flavor_arg
+        cur = self.state.get("flavor")
+        if cur:
+            return cur
+        return self.ask_gpu(self._info)
 
     def latest(self) -> dict | None:
         try:
-            return fetch_json(self.update_url)
+            self._info = fetch_json(self.update_url)
+            return self._info
         except (OSError, ValueError) as e:
             self.ui.log(f"Không kiểm được bản mới ({e})")
             return None
@@ -262,15 +306,21 @@ class Launcher:
         self.ui.log(f"Đã cài Beauty HDR {info['version']} ({flavor}).")
 
     def offer_gpu(self, info: dict | None) -> None:
-        """Đang dùng bản CPU mà máy có card NVIDIA: hỏi một lần có chuyển sang bản GPU không (giữ nguyên model)."""
-        if info is None or self.state.get("flavor") != "cpu" or self.state.get("gpu_asked") or "cuda" not in info["flavors"]:
+        """Đang dùng bản CPU mà máy có card dùng được (NVIDIA, Intel Arc/Iris Xe): hỏi một lần cho mỗi loại card có
+        chuyển sang bản GPU không (giữ nguyên model)."""
+        if info is None or self.state.get("flavor") != "cpu":
             return
-        if not has_nvidia():
+        flavor, vendor = recommend_flavor(adapter_names(), has_nvidia(), set(info["flavors"]))
+        asked = self.state.get("gpu_asked") or []
+        if isinstance(asked, bool):  # state cũ (0.13): chỉ có cờ chung
+            asked = ["cuda"] if asked else []
+        if flavor == "cpu" or flavor in asked:
             return
-        self.state.set(gpu_asked=True)
-        if self.ui.ask("Máy có card NVIDIA", "Bản đang cài chỉ chạy bằng CPU nên chậm. Chuyển sang bản GPU NVIDIA "
-                       "(nhanh hơn khoảng 10 lần, tải thêm khoảng 3 GB, model giữ nguyên)?"):
-            self.install(info, "cuda")
+        self.state.set(gpu_asked=asked + [flavor])
+        name = "NVIDIA" if flavor == "cuda" else "Intel"
+        if self.ui.ask(f"Máy có card {name}", f"Bản đang cài chỉ chạy bằng CPU nên chậm. Chuyển sang bản GPU {name} "
+                       "(nhanh hơn nhiều lần, tải thêm vài GB, model giữ nguyên)?"):
+            self.install(info, flavor)
             self.state.set(**{MODEL_MARK: True})  # model không đổi theo bản app
 
     def models(self) -> None:

@@ -1385,3 +1385,57 @@ def test_gui_deshine_checkbox_shared(monkeypatch, tmp_path):
     assert [sec.title for sec in w.sections if not sec.isHidden()] == ["Khuôn mặt"]
     w.close()
     app.processEvents()
+
+
+def test_gpu_vendors_and_advice():
+    """0.14.1: nhận diện hãng card từ tên, lời khuyên theo hãng, đọc danh sách card Windows (bỏ card ảo)."""
+    from net_anh import hardware
+
+    G = hardware.Gpu
+    assert G("NVIDIA GeForce GTX 1660 Ti", 6, False).vendor == "nvidia"
+    assert G("AMD Radeon RX 6600", 8, False).vendor == "amd"
+    assert G("Intel(R) Arc(TM) A750 Graphics", 8, False).vendor == "intel"
+    assert G("Intel(R) UHD Graphics 770", 0, False).vendor == "intel"
+    assert "GPU Intel" in hardware.advice(G("Intel(R) Iris(R) Xe Graphics", 0, False))
+    assert "chưa hỗ trợ card AMD" in hardware.advice(G("AMD Radeon(TM) Graphics", 0, False))
+    assert "GPU NVIDIA" in hardware.advice(G("NVIDIA GeForce RTX 3060", 12, False))
+    js = ('[{"Name":"Intel(R) UHD Graphics 630","AdapterRAM":1073741824},{"Name":"NVIDIA GeForce GTX 1050","AdapterRAM":4293918720},'
+          '{"Name":"Microsoft Basic Display Adapter","AdapterRAM":0},{"Name":"Parsec Virtual Display Adapter","AdapterRAM":null}]')
+    got = hardware.parse_adapters(js)
+    assert [g.name for g in got] == ["Intel(R) UHD Graphics 630", "NVIDIA GeForce GTX 1050"]
+    assert got[0].vram_gb == 1.0 and got[1].vram_gb == 0.0  # AdapterRAM 4 GB bị cắt ở 32 bit: coi là không rõ
+    assert hardware.parse_adapters("không phải json") == []
+    m = hardware.Machine("cpu", 4, 8, 4, (G("AMD Radeon RX 6600", 8, False), G("Intel UHD", 0, False)), False)
+    assert m.unused_gpu.vendor == "intel"  # ưu tiên Intel (có gói xpu) hơn AMD
+    hardware.machine.cache_clear()
+    import net_anh.hardware as hw
+    orig = hw.machine
+    hw.machine = lambda: m
+    try:
+        assert "GPU Intel" in hardware.warnings("compact", None, 1000, 1000, 0, 1.0, "cpu", 4)[-1]
+    finally:
+        hw.machine = orig
+
+
+def test_non_cuda_gpu_error_falls_back_to_cpu(monkeypatch):
+    """Intel XPU / DirectML lỗi lúc chạy: chạy lại bằng CPU, ghi chú rõ, ảnh sau dùng CPU luôn."""
+    from net_anh import pipeline
+    from net_anh.device import DeviceInfo, pick_device
+    from net_anh.settings import Settings
+
+    eng = pipeline.Enhancer("cpu")
+    fake = DeviceInfo(eng.dev.device, "GPU Intel Arc (8 GB, Intel XPU)", "xpu", False)
+    eng.dev = fake
+    calls = []
+
+    def boom(self, img, s, rep):
+        calls.append(self.dev.kind)
+        if self.dev.kind == "xpu":
+            raise RuntimeError("UR_RESULT_ERROR_OUT_OF_RESOURCES")
+        return img.copy()
+
+    monkeypatch.setattr(pipeline.Enhancer, "_process_ai", boom)
+    img = np.full((64, 64, 3), 120, np.uint8)
+    out, rep = eng.process(img, Settings(mode="portrait", upscale=1))
+    assert calls == ["xpu", "cpu"] and eng.dev.kind == "cpu" and eng.gpu_failed
+    assert any("GPU lỗi" in n for n in rep.notes) and not rep.ai_fallback and rep.device.startswith("CPU")
