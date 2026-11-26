@@ -233,22 +233,119 @@ def compare(ref, out) -> ProbeResult:
     return ProbeResult(ok, mean, p999, "" if ok else f"lệch fp32 {mean * 255:.1f} mức xám")
 
 
-def probe_dtype(net, device, dtype, size: int = 96) -> ProbeResult:
+def face_forward(net, x):
+    """Model mặt (GFPGAN, RestoreFormer): vào ảnh 0..1, ra 0..1 (mạng dùng thang −1..1) để so như model nền."""
+    return (net(x * 2 - 1, return_rgb=False)[0] + 1) / 2
+
+
+def probe_dtype(net, device, dtype, size: int = 96, fn=None) -> ProbeResult:
     """Chạy thử `net` (đang ở fp32 trên `device`) với ảnh mẫu ở fp32 và ở `dtype`, so kết quả. Trả về net ở trạng thái
-    fp32 (người gọi tự đổi kiểu khi ok)."""
+    fp32 (người gọi tự đổi kiểu khi ok). `fn(net, x)`: cách gọi mạng (mặc định net(x)); model mặt dùng face_forward
+    với ảnh 512 px."""
     import torch
 
+    fn = fn or (lambda n, z: n(z))
     x = probe_image(size).to(device)
     try:
         with torch.no_grad():
-            ref = net(x)
+            torch.manual_seed(0)  # GFPGAN cộng nhiễu ngẫu nhiên: cùng hạt giống cho hai lần chạy
+            ref = fn(net, x)
             net.to(dtype)
-            out = net(x.to(dtype))
+            torch.manual_seed(0)
+            out = fn(net, x.to(dtype))
         return compare(ref, out)
     except Exception as e:  # kiểu số không chạy được trên card / bản PyTorch này
         return ProbeResult(False, math.inf, math.inf, f"{e.__class__.__name__}: {str(e)[:80]}")
     finally:
         net.float()
+
+
+# ---------------------------------------------------------------- tăng tốc thêm theo card × model
+
+# Kiến trúc từng model: tích chập (conv) hay chú ý (attention). Tensor Core (RTX 20 trở lên) chạy tích chập fp16 / bf16
+# nhanh nhất khi dữ liệu xếp theo kênh cuối (channels_last, NHWC); để mặc định (NCHW) thì cuDNN phải đảo lại mỗi lớp.
+# GFPGAN là "stylegan": có .view() trên đặc trưng nên không chạy được kênh cuối (đã thử, lỗi view size).
+MODEL_ARCH = {"compact": "conv", "rrdb": "conv", "plksr": "conv", "dat2": "attention", "gfpgan": "stylegan",
+              "restoreformer": "attention", "restoreformer_pp": "attention"}
+MODEL_OF_KEY = {"compact": "compact", "esrgan_x4": "rrdb", "esrgan_x2": "rrdb", "plksr_web": "plksr",
+                "dat2_web": "dat2"}
+
+
+def _env_flag(name: str) -> bool | None:
+    v = os.environ.get(name, "").strip().lower()
+    return {"1": True, "on": True, "0": False, "off": False}.get(v)
+
+
+def channels_last(kind: str, cc: tuple[int, int] | None, dtype: str, model: str) -> bool:
+    """Xếp dữ liệu kênh cuối cho model này không. Chỉ bật ở nơi chắc có lợi: card NVIDIA có Tensor Core (cc ≥ 7.0),
+    kiểu số fp16 / bf16, model tích chập. Kết quả ảnh không đổi (cùng phép tính, chỉ khác thứ tự trong bộ nhớ).
+    NETANH_CHANNELS_LAST=0|1 để ép (đo so sánh: Trợ giúp → Đo tốc độ card)."""
+    if kind != "cuda" or MODEL_ARCH.get(model) != "conv":
+        return False
+    env = _env_flag("NETANH_CHANNELS_LAST")
+    if env is not None:
+        return env
+    return cc is not None and tuple(cc) >= (7, 0) and dtype in ("fp16", "bf16")
+
+
+def cudnn_benchmark(kind: str) -> bool:
+    """Cho cuDNN tự đo và chọn thuật toán nhanh nhất cho từng cỡ ô (tốn chút thời gian lần đầu mỗi cỡ). Chỉ bật khi làm
+    cả thư mục trên NVIDIA: các ảnh sau cùng cỡ ô nên lợi; ảnh lẻ thì không đáng. NETANH_CUDNN_BENCHMARK=0|1 để ép."""
+    if kind != "cuda":
+        return False
+    env = _env_flag("NETANH_CUDNN_BENCHMARK")
+    return True if env is None else env
+
+
+def face_candidates(fam: Family, model: str) -> list[str]:
+    """Kiểu số thử cho model mặt: chỉ bf16 (card có bf16 thật, RTX 30 trở lên), không thì fp32. fp16 bị loại: đo trên
+    CPU 2026-11-26 GFPGAN fp16 lệch fp32 tới 91 mức xám (chuẩn hoá trọng số StyleGAN tràn số), bf16 chỉ lệch 0,5 mức."""
+    return (["bf16"] if "bf16" in fam.precisions else []) + ["fp32"]
+
+
+def to_channels_last(net) -> None:
+    """Đổi trọng số các lớp Conv2d sang kênh cuối (Module.to(memory_format) lỗi với tham số không phải 4 chiều)."""
+    import torch
+
+    for m in net.modules():
+        if isinstance(m, torch.nn.Conv2d):
+            m.to(memory_format=torch.channels_last)
+
+
+def to_contiguous(net) -> None:
+    import torch
+
+    for m in net.modules():
+        if isinstance(m, torch.nn.Conv2d):
+            m.to(memory_format=torch.contiguous_format)
+
+
+# Tốc độ dự kiến: thời gian mỗi megapixel ảnh VÀO trên CPU 4 luồng (đo 2026-11-26, ô 192 px, PyTorch 2.x) chia cho
+# speedup của dòng card và hệ số kiểu số. CHƯA ĐO TRÊN GPU THẬT: số ước lượng, sẽ thay bằng file đo của huy.
+CPU_S_PER_MP = {"compact": 4.8, "plksr": 34.5, "rrdb": 83.0, "dat2": 286.0}
+CPU_S_PER_FACE = {"gfpgan": 1.15}
+# nhanh thêm bao nhiêu lần so với fp32 trên cùng card có Tensor Core (tích chập fp16 + kênh cuối ≈ 2×, chú ý bf16 ≈ 1,5×)
+DTYPE_GAIN = {("conv", "fp16"): 2.0, ("conv", "bf16"): 1.8, ("attention", "bf16"): 1.5, ("attention", "fp16"): 1.6,
+              ("stylegan", "bf16"): 1.5}
+
+
+def best_dtype(fam: Family, model: str) -> str:
+    """Kiểu số dự kiến app sẽ chọn cho model trên dòng card (khi chạy thử đạt)."""
+    if model in ("dat2",):  # DAT-2 fp16 ra NaN: chỉ bf16 thật (cc ≥ 8)
+        return "bf16" if "bf16" in fam.precisions else "fp32"
+    if model in CPU_S_PER_FACE or model.startswith("restoreformer"):  # model mặt
+        return face_candidates(fam, model)[0]
+    return fam.precisions[0]
+
+
+def est_seconds(fam: Family, model: str, mp: float = 1.0) -> float | None:
+    """Thời gian dự kiến cho `mp` megapixel ảnh vào (model nền) hoặc một mặt (model mặt). None khi chưa có số đo CPU."""
+    base = CPU_S_PER_MP.get(model) if model in CPU_S_PER_MP else CPU_S_PER_FACE.get(model)
+    if not base:
+        return None
+    mult = mp if model in CPU_S_PER_MP else 1.0
+    gain = DTYPE_GAIN.get((MODEL_ARCH.get(model, "conv"), best_dtype(fam, model)), 1.0)
+    return base * mult / max(fam.speedup, 1e-6) / gain
 
 
 # ---------------------------------------------------------------- cỡ ô theo bộ nhớ
@@ -330,6 +427,57 @@ def recommendation(fam: Family, vram_gb: float = 0.0) -> dict[str, str]:
             "Nên dùng": level, "Hàng loạt": batch, "Mức hỗ trợ": fam.support, "Ghi chú": fam.note}
 
 
+MODELS = (("compact", "Real-ESRGAN compact (mức 1–4, mặc định)"), ("plksr", "RealPLKSR (mức 5)"),
+          ("rrdb", "Real-ESRGAN x4plus"), ("dat2", "DAT-2 (mức 6 Cao nhất)"), ("gfpgan", "GFPGAN (mỗi khuôn mặt)"))
+MODEL_COLS = ("Model", "Kiểu số", "Kênh cuối", "Cắt ô", "Dự kiến", "Ghi chú")
+
+
+def _fmt_s(t: float | None) -> str:
+    if t is None:
+        return "?"
+    if t < 0.1:
+        return f"{t * 1000:.0f} ms"
+    return f"{t:.1f} s" if t < 60 else f"{t / 60:.1f} phút"
+
+
+def model_rows(fam: Family, vram_gb: float = 0.0, cc: tuple[int, int] | None = None) -> list[dict[str, str]]:
+    """Bảng card × model: kiểu số app sẽ chọn (khi chạy thử đạt), có xếp kênh cuối không, cỡ ô theo VRAM và thời gian
+    dự kiến cho ảnh 1 MP vào (≈ 1200×800, ra 4 800×3 200) hoặc một mặt. Thời gian là ƯỚC LƯỢNG: số đo CPU / speedup dòng
+    card / hệ số kiểu số; sẽ thay bằng số đo thật (Trợ giúp → Đo tốc độ card)."""
+    gpu = fam.key not in ("cpu", "kepler")
+    kind = "cuda" if fam.key in ("rtx50", "rtx40", "rtx30", "rtx20", "gtx16", "volta", "gtx10", "maxwell", "nvidia") else "other"
+    cc = cc or {"rtx50": (12, 0), "rtx40": (8, 9), "rtx30": (8, 6), "rtx20": (7, 5), "gtx16": (7, 5), "volta": (7, 0),
+                "gtx10": (6, 1), "maxwell": (5, 2)}.get(fam.key)
+    v = vram_gb or (min(fam.vram_common) if fam.vram_common else 0.0)
+    rows = []
+    for m, label in MODELS:
+        dt = best_dtype(fam, m) if gpu else "fp32"
+        face = m == "gfpgan"
+        if face:
+            tile = "512 px cố định (một mặt)"
+        elif not gpu:
+            tile = f"{CPU_TILE} px"
+        elif v:
+            tile = f"{auto_tile(m, v * 0.9, v, dt)} px ({v:g} GB)"
+        else:
+            tile = "theo bộ nhớ, không đọc được thì 400 px"
+        note = ""
+        if m == "dat2":
+            note = "fp16 ra NaN nên chỉ bf16 (RTX 30 trở lên) hoặc fp32" if dt == "fp32" and gpu else "Model chú ý: không dùng kênh cuối"
+            if fam.key in ("gtx16", "gtx10", "maxwell", "intel_igpu", "amd_dml", "cpu", "kepler"):
+                note = "Rất chậm trên dòng này: nên dùng mức 1–5"
+        elif face:
+            note = ("bf16 (lệch < 1 mức xám); fp16 bị loại vì lệch màu mặt 91 mức xám" if dt == "bf16" else
+                    "fp32: fp16 làm lệch màu mặt (91 mức xám), dòng này không có bf16 thật") if gpu else ""
+        elif m == "compact":
+            note = "Nhẹ nhất, mặc định"
+        cl = channels_last(kind, cc, dt, m)
+        rows.append({"Model": label, "Kiểu số": dt, "Kênh cuối": "có" if cl else "không", "Cắt ô": tile,
+                     "Dự kiến": _fmt_s(est_seconds(fam, m, 1.0)) + (" / mặt" if face else " / 1 MP vào"),
+                     "Ghi chú": note})
+    return rows
+
+
 TABLE_ORDER = ("rtx50", "rtx40", "rtx30", "rtx20", "gtx16", "gtx10", "maxwell", "kepler", "intel_arc", "intel_igpu",
                "amd_rocm", "amd_dml", "apple", "cpu")
 
@@ -338,5 +486,6 @@ def table() -> list[dict[str, str]]:
     return [recommendation(FAMILIES[k]) for k in TABLE_ORDER]
 
 
-__all__ = ["Family", "FAMILIES", "nvidia_family", "family_of", "arch_supported", "candidates", "probe_image",
+__all__ = ["model_rows", "MODELS", "MODEL_COLS", "to_channels_last", "to_contiguous", "channels_last", "cudnn_benchmark", "face_candidates", "face_forward", "best_dtype", "est_seconds",
+           "MODEL_ARCH", "Family", "FAMILIES", "nvidia_family", "family_of", "arch_supported", "candidates", "probe_image",
            "probe_dtype", "compare", "ProbeResult", "auto_tile", "vram_class", "batch_workers", "recommendation", "table"]

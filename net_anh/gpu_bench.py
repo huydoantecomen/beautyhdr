@@ -11,7 +11,8 @@ Kết quả ghi ra file BeautyHDR-do-gpu-<card>-<ngày>.txt và .json trong thư
   1. Máy: CPU, RAM, card, driver, bản PyTorch / CUDA, mã máy (sm_XX) có trong PyTorch, dòng card app nhận ra.
   2. Mỗi model nền đã tải (compact, x4plus, RealPLKSR, DAT-2) ở từng kiểu số fp32 / fp16 / bf16: lệch so với fp32 trên
      ảnh mẫu, thời gian ô 256 và 512 px, đỉnh bộ nhớ GPU (byte mỗi điểm ảnh ô vào).
-  3. Model mặt GFPGAN: thời gian mỗi mặt.
+  3. Model mặt GFPGAN ở fp32 / fp16 / bf16: lệch so với fp32 và thời gian mỗi mặt; kiểu app tự chọn.
+  Model tích chập ở fp16 / bf16: thêm thời gian khi xếp dữ liệu kênh cuối (channels_last), để biết có nên bật.
   4. Cả quy trình: làm nét 6 ảnh 1600×1200 ở mức 3 (compact + GFPGAN nếu có mặt), một luồng và hai luồng song song.
 """
 from __future__ import annotations
@@ -167,6 +168,14 @@ def run(say: Callable[[str], None] = print, quick: bool = False, out_dir: Path |
                         row[f"bytes_per_px_{s}"] = round(pk / (s * s))
                     if t > 20:  # máy chậm: khỏi đo ô lớn hơn
                         break
+                if gpu and gpu_profile.MODEL_ARCH.get(key) == "conv":  # kênh cuối (channels_last) nhanh hơn bao nhiêu
+                    s = sizes[-1]
+                    x = torch.rand(1, 3, s, s, device=dev.device).to(DT[name]).contiguous(memory_format=torch.channels_last)
+                    gpu_profile.to_channels_last(net)
+                    try:
+                        row[f"s_{s}_kenh_cuoi"] = round(_time_forward(net, x, dev, 3), 4)
+                    finally:
+                        gpu_profile.to_contiguous(net)
             except Exception as e:  # thiếu bộ nhớ, kiểu số không chạy
                 row["error"] = f"{e.__class__.__name__}: {str(e).splitlines()[0][:120] if str(e) else ''}"
                 _reset_peak(dev)
@@ -177,15 +186,34 @@ def run(say: Callable[[str], None] = print, quick: bool = False, out_dir: Path |
         del net
         _reset_peak(dev)
 
-    # ---- 3. model mặt
+    # ---- 3. model mặt: fp32 và bf16 (fp16 lệch nặng ở GFPGAN), kiểu app tự chọn
     if weights.status("gfpgan") == "ready":
         try:
-            f = eng._load_gfpgan()
+            from .archs import GFPGANv1Clean
+            ck = torch.load(weights.weights_dir() / weights.MANIFEST["gfpgan"].file, map_location="cpu", weights_only=True)
+            f = GFPGANv1Clean(out_size=512, num_style_feat=512, channel_multiplier=2, decoder_load_path=None,
+                              fix_decoder=False, num_mlp=8, input_is_latent=True, different_w=True, narrow=1, sft_half=True)
+            f.load_state_dict(ck.get("params_ema", ck), strict=True)
+            f = f.eval().to(dev.device)
             x = torch.rand(1, 3, 512, 512, device=dev.device) * 2 - 1
-            with torch.no_grad():
-                t = _time_forward(lambda z: f(z, return_rgb=False, weight=0.5)[0], x, dev, 3)
-            rep["face"]["gfpgan_fp32_s"] = round(t, 4)
-            say(f"GFPGAN (fp32): {t:.3f} s mỗi mặt")
+            for name in (["fp32", "fp16", "bf16"] if gpu else ["fp32"]):
+                if name != "fp32":
+                    r = gpu_profile.probe_dtype(f, dev.device, DT[name], size=512, fn=gpu_profile.face_forward)
+                    rep["face"][f"gfpgan_{name}_lech_muc_xam"] = round(r.mean_err * 255, 2) if math.isfinite(r.mean_err) else "NaN"
+                try:
+                    f.to(DT[name])
+                    xx = x.to(DT[name])
+                    with torch.no_grad():
+                        t = _time_forward(lambda z: f(z, return_rgb=False)[0], xx, dev, 3)
+                    rep["face"][f"gfpgan_{name}_s"] = round(t, 4)
+                    say(f"GFPGAN ({name}): {t:.3f} s mỗi mặt")
+                except Exception as e:
+                    rep["face"][f"gfpgan_{name}_loi"] = f"{e.__class__.__name__}: {str(e)[:100]}"
+                finally:
+                    f.float()
+            eng._place_face(f, "gfpgan")  # kiểu app tự chọn trên card này (chạy thử như khi xử lý thật)
+            rep["face"]["app_chon"] = eng.precision.get("gfpgan", ("fp32",))[0]
+            del f
         except Exception as e:
             rep["face"]["error"] = f"{e.__class__.__name__}: {e}"
 

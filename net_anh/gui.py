@@ -449,7 +449,7 @@ class CardsDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.setWindowTitle("Khuyến nghị theo card")
-        self.resize(1180, 520)
+        self.resize(1180, 720)
         devs = getattr(parent, "_devices", [])
         mine = next(iter(best_first([d for d in devs if d.kind != "cpu"])), None)
         mine_key = mine.family.key if mine is not None else "cpu"
@@ -479,9 +479,27 @@ class CardsDialog(QDialog):
                       "thì tự chia nhỏ hơn. Tốc độ GPU trong ước tính thời gian là ước lượng, chưa đo trên từng dòng card.")
         note.setWordWrap(True)
         note.setObjectName("muted")
+        # bảng thứ hai: từng model trên card của máy này (kiểu số, kênh cuối, cỡ ô, thời gian dự kiến)
+        fam = mine.family if mine is not None else gpu_profile.FAMILIES["cpu"]
+        mrows = gpu_profile.model_rows(fam, getattr(mine, "vram_gb", 0.0) or 0.0, getattr(mine, "cc", None))
+        mt = QTableWidget(len(mrows), len(gpu_profile.MODEL_COLS))
+        mt.setHorizontalHeaderLabels(list(gpu_profile.MODEL_COLS))
+        mt.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        for r, row in enumerate(mrows):
+            for c, col in enumerate(gpu_profile.MODEL_COLS):
+                it = QTableWidgetItem(row[col])
+                it.setToolTip(row[col])
+                mt.setItem(r, c, it)
+        for c, w in enumerate((260, 70, 80, 200, 130, 420)):
+            mt.setColumnWidth(c, w)
+        mt.setMaximumHeight(200)
+        self.model_table = mt
+        mhead = QLabel(f"<b>Từng model trên {fam.label}</b> (thời gian là ước lượng, chưa đo trên card này)")
         lay = QVBoxLayout(self)
         lay.addWidget(head)
         lay.addWidget(t, 1)
+        lay.addWidget(mhead)
+        lay.addWidget(mt)
         lay.addWidget(note)
 
     @staticmethod

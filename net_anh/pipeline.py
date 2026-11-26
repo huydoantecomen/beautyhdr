@@ -401,7 +401,60 @@ class Enhancer:
             if bad:
                 self.say(f"{key}: {'; '.join(bad)} trên {self.dev.name}, dùng {name}")
         dt = self._DT[name]
-        return net.to(dt), dt
+        net = net.to(dt)
+        self._memory_format(net, gpu_profile.MODEL_OF_KEY.get(key, key), name)
+        return net, dt
+
+    def _memory_format(self, net: torch.nn.Module, model: str, dtype: str) -> None:
+        """Tensor Core + fp16/bf16 + mạng tích chập: xếp trọng số kênh cuối (gpu_profile.channels_last); _forward đổi
+        ảnh vào theo. Đánh dấu trên mạng để quay về fp32 (sửa tràn số) vẫn đúng."""
+        cl = gpu_profile.channels_last(self.dev.kind, self.dev.cc, dtype, model)
+        if cl:
+            gpu_profile.to_channels_last(net)
+        net._netanh_cl = cl
+
+    def _place_face(self, net: torch.nn.Module, key: str) -> torch.nn.Module:
+        """Model mặt lên thiết bị: chạy thử mặt mẫu 512 px ở các kiểu số nhanh (gpu_profile.face_candidates) so với fp32,
+        đạt thì dùng. GTX 16, GTX 10, Intel, CPU: fp32 như cũ."""
+        net = net.eval().to(self.dev.device)
+        net._netanh_cl = False
+        if self.dev.kind == "cpu":
+            return net
+        if key not in self.precision:
+            tried: list[tuple[str, gpu_profile.ProbeResult]] = []
+            name = "fp32"
+            native_bf16 = self.dev.kind == "cuda" and (self.dev.cc or (0, 0))[0] >= 8 and not getattr(torch.version, "hip", None)
+            for cand in gpu_profile.face_candidates(self.dev.family, key):
+                if cand == "fp32" or (cand == "bf16" and not native_bf16):
+                    continue
+                r = gpu_profile.probe_dtype(net, self.dev.device, self._DT[cand], size=512, fn=gpu_profile.face_forward)
+                tried.append((cand, r))
+                if r.ok:
+                    name = cand
+                    break
+            self.precision[key] = (name, tried)
+            bad = [f"{c} {r.why}" for c, r in tried if not r.ok]
+            if bad:
+                self.say(f"{key}: {'; '.join(bad)} trên {self.dev.name}, dùng {name}")
+        name = self.precision[key][0]
+        net = net.to(self._DT[name])
+        self._memory_format(net, key, name)
+        return net
+
+    def _face_run(self, net: torch.nn.Module, t: torch.Tensor) -> torch.Tensor:
+        """Chạy model mặt đúng kiểu số và cách xếp bộ nhớ của nó; fp16/bf16 ra NaN thì đổi model đó về fp32 và chạy lại."""
+        params = getattr(net, "parameters", None)
+        pdt = next(params()).dtype if params is not None else torch.float32
+        x = t.to(pdt)
+        if getattr(net, "_netanh_cl", False):
+            x = x.contiguous(memory_format=torch.channels_last)
+        o = net(x, return_rgb=False)[0]
+        if pdt != torch.float32 and not torch.isfinite(o).all():
+            net.float()
+            net._netanh_cl = False
+            gpu_profile.to_contiguous(net)
+            o = net(t.float().contiguous(), return_rgb=False)[0]
+        return o.float()
 
     # ----- nạp model khi cần -----
 
@@ -466,7 +519,7 @@ class Enhancer:
                 ckpt = torch.load(path, map_location="cpu", weights_only=True)  # checkpoint Lightning gốc của tác giả
                 sd = ckpt.get("state_dict", ckpt)
                 net.load_state_dict({k.removeprefix("vqvae."): v for k, v in sd.items()}, strict=True)
-                self._restoreformer_pp = net.eval().to(self.dev.device)
+                self._restoreformer_pp = self._place_face(net, "restoreformer_pp")
             return self._restoreformer_pp
         if name == "restoreformer":
             if getattr(self, "_restoreformer", None) is None:
@@ -476,7 +529,7 @@ class Enhancer:
                 net = RestoreFormer()
                 ckpt = torch.load(path, map_location="cpu", weights_only=True)
                 net.load_state_dict(ckpt.get("params_ema", ckpt.get("params", ckpt)), strict=True)
-                self._restoreformer = net.eval().to(self.dev.device)
+                self._restoreformer = self._place_face(net, "restoreformer")
             return self._restoreformer
         return self._load_gfpgan()
 
@@ -489,7 +542,7 @@ class Enhancer:
                                 sft_half=True)
             ckpt = torch.load(path, map_location="cpu", weights_only=True)
             net.load_state_dict(ckpt.get("params_ema", ckpt), strict=True)
-            self._gfpgan = net.eval().to(self.dev.device)
+            self._gfpgan = self._place_face(net, "gfpgan")
         return self._gfpgan
 
     # nhãn ParseNet (CelebAMask-HQ): 2–3 lông mày, 4–5 mắt, 6 kính, 11 miệng, 12–13 môi
@@ -823,13 +876,19 @@ class Enhancer:
         """Chạy mạng nền. fp16 có thể tràn số (ra NaN/vô cực, thành mảng đen) ở vùng sáng phẳng trên một số GPU và
         bản PyTorch: gặp thì đổi hẳn mạng đó sang fp32 và chạy lại ô này (các ô sau cũng chạy fp32)."""
         pdt = next(net.parameters()).dtype
-        o = net(x.to(pdt))
+        x = x.to(pdt)
+        if getattr(net, "_netanh_cl", False):
+            x = x.contiguous(memory_format=torch.channels_last)
+        o = net(x)
         # ô ra toàn đen trong khi ảnh vào không tối cũng là dấu hiệu tràn số (giá trị lỗi bị kẹp về 0)
         if not torch.isfinite(o).all() or (pdt != torch.float32 and float(o.amax()) < 0.02 < float(x.amax())):
             if pdt != torch.float32:
                 net.float()
+                if getattr(net, "_netanh_cl", False):  # fp32 trên card cũ hơn không lợi từ kênh cuối: về như cũ
+                    gpu_profile.to_contiguous(net)
+                    net._netanh_cl = False
                 self._fp32_fallback = True
-                o = net(x.float())
+                o = net(x.float().contiguous())
             if not torch.isfinite(o).all():  # vẫn lỗi ở fp32: thay giá trị lỗi để khỏi ra mảng đen
                 self._nonfinite = True
                 o = torch.nan_to_num(o.float(), nan=0.5, posinf=1.0, neginf=0.0)
@@ -1219,7 +1278,7 @@ class Enhancer:
                     pass
             t = (_to_tensor(face, self.dev, False) - 0.5) / 0.5
             try:
-                restored = _to_image(net(t, return_rgb=False)[0], -1.0, 1.0)
+                restored = _to_image(self._face_run(net, t), -1.0, 1.0)
                 ok_faces += 1
             except RuntimeError as e:  # lỗi model với mặt này: giữ mặt gốc (vẫn ghép lại để đủ danh sách mặt)
                 rep.notes.append(f"Mặt {n} lỗi khi xử lý ({e.__class__.__name__}), giữ nguyên")
@@ -1251,7 +1310,7 @@ class Enhancer:
                 if s.face_model != "restoreformer_pp" and weights.status("restoreformer_pp") == "ready":
                     try:
                         net2 = self._load_face_net("restoreformer_pp")
-                        heavy = _to_image(net2(t, return_rgb=False)[0], -1.0, 1.0)
+                        heavy = _to_image(self._face_run(net2, t), -1.0, 1.0)
                         if s.color_match:
                             heavy = match_color(heavy, face)
                     except (RuntimeError, OSError, weights.ModelError):

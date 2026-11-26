@@ -520,3 +520,122 @@ def test_driver_and_kepler_advice(monkeypatch):
     assert "Kepler" in hardware.advice(k)
     monkeypatch.setattr(torch.version, "cuda", None)
     assert "chọn bản GPU NVIDIA" in hardware.advice(g)
+
+
+# ---------------------------------------------------------------- tăng tốc thêm: kênh cuối, model mặt, cuDNN
+
+def test_channels_last_rules(monkeypatch):
+    monkeypatch.delenv("NETANH_CHANNELS_LAST", raising=False)
+    assert gp.channels_last("cuda", (8, 6), "fp16", "compact")
+    assert gp.channels_last("cuda", (7, 5), "fp16", "rrdb")  # RTX 20 có Tensor Core
+    assert not gp.channels_last("cuda", (7, 5), "fp32", "compact")  # GTX 16 fp32: không lợi
+    assert not gp.channels_last("cuda", (6, 1), "fp32", "compact")
+    assert not gp.channels_last("cuda", (8, 9), "bf16", "dat2")  # model chú ý
+    assert not gp.channels_last("cuda", (8, 9), "bf16", "gfpgan")  # GFPGAN lỗi .view() với kênh cuối
+    assert not gp.channels_last("xpu", (8, 6), "fp16", "compact")
+    monkeypatch.setenv("NETANH_CHANNELS_LAST", "0")
+    assert not gp.channels_last("cuda", (8, 6), "fp16", "compact")
+    monkeypatch.setenv("NETANH_CHANNELS_LAST", "1")
+    assert gp.channels_last("cuda", (6, 1), "fp32", "compact")
+
+
+def test_channels_last_same_result(fake_engine):
+    e = fake_engine("rtx30")
+    net = e._load_compact(1.0)
+    assert net._netanh_cl
+    conv = next(m for m in net.modules() if isinstance(m, torch.nn.Conv2d))
+    assert conv.weight.is_contiguous(memory_format=torch.channels_last)
+    x = gp.probe_image(48)
+    with torch.no_grad():
+        a = e._forward(net, x)
+        gp.to_contiguous(net)
+        net._netanh_cl = False
+        b = e._forward(net, x)
+    assert float((a.float() - b.float()).abs().max()) < 1e-2
+    g = fake_engine("gtx16", (7, 5), 6.0)
+    assert not g._load_compact(1.0)._netanh_cl
+
+
+def test_face_candidates_per_family():
+    assert gp.face_candidates(gp.FAMILIES["rtx30"], "gfpgan") == ["bf16", "fp32"]
+    assert gp.face_candidates(gp.FAMILIES["rtx50"], "restoreformer_pp") == ["bf16", "fp32"]
+    for k in ("rtx20", "gtx16", "gtx10", "intel_arc", "cpu"):
+        assert gp.face_candidates(gp.FAMILIES[k], "gfpgan") == ["fp32"], k
+
+
+def test_gfpgan_bf16_on_ampere_fp32_on_turing(fake_engine):
+    from net_anh import weights
+    from net_anh.pipeline import Enhancer
+
+    if weights.status("gfpgan") != "ready":
+        pytest.skip("chưa tải GFPGAN")
+    t = (gp.probe_image(512) - 0.5) / 0.5
+    with torch.no_grad():
+        ref = Enhancer("cpu")._load_gfpgan()
+        torch.manual_seed(1)
+        a = ref(t, return_rgb=False)[0]
+        e = fake_engine("rtx30")
+        f = e._load_gfpgan()
+        assert next(f.parameters()).dtype == torch.bfloat16 and e.precision["gfpgan"][0] == "bf16"
+        torch.manual_seed(1)
+        b = e._face_run(f, t)
+    assert b.dtype == torch.float32
+    assert float(((a - b).abs() / 2).mean()) < 0.01
+    r = fake_engine("rtx20", (7, 5), 8.0)
+    assert next(r._load_gfpgan().parameters()).dtype == torch.float32
+
+
+def test_face_run_falls_back_to_fp32_on_nan(fake_engine):
+    class BadHalf(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.c = torch.nn.Conv2d(3, 3, 1)
+
+        def forward(self, x, return_rgb=False):
+            y = self.c(x)
+            return (y * float("inf") if y.dtype != torch.float32 else y,)
+
+    e = fake_engine("rtx30")
+    net = BadHalf().to(torch.bfloat16)
+    net._netanh_cl = False
+    o = e._face_run(net, torch.rand(1, 3, 16, 16))
+    assert torch.isfinite(o).all() and next(net.parameters()).dtype == torch.float32
+
+
+def test_batch_turns_on_cudnn_benchmark_and_restores():
+    from types import SimpleNamespace
+
+    from net_anh.batch import BatchRunner
+
+    old = torch.backends.cudnn.benchmark
+    seen = []
+    eng = SimpleNamespace(dev=SimpleNamespace(kind="cuda"))
+    BatchRunner([eng], lambda i: i).run([1, 2, 3], lambda e, lo: seen.append(torch.backends.cudnn.benchmark))
+    assert seen == [True] * 3 and torch.backends.cudnn.benchmark == old
+    seen.clear()
+    BatchRunner([eng], lambda i: i).run([1, 2], lambda e, lo: seen.append(torch.backends.cudnn.benchmark))
+    assert seen == [old] * 2  # 1–2 ảnh: không đáng cho cuDNN đo
+    cpu = SimpleNamespace(dev=SimpleNamespace(kind="cpu"))
+    seen.clear()
+    BatchRunner([cpu], lambda i: i).run([1, 2, 3], lambda e, lo: seen.append(torch.backends.cudnn.benchmark))
+    assert seen == [old] * 3
+
+
+@pytest.mark.parametrize("key", gp.TABLE_ORDER)
+def test_model_rows_every_family(key):
+    rows = gp.model_rows(gp.FAMILIES[key])
+    assert [r["Model"] for r in rows] == [m[1] for m in gp.MODELS]
+    for r in rows:
+        assert set(r) == set(gp.MODEL_COLS) and r["Dự kiến"] != "?"
+    dat = rows[3]
+    if key in ("rtx30", "rtx40", "rtx50"):
+        assert dat["Kiểu số"] == "bf16" and rows[0]["Kênh cuối"] == "có" and rows[4]["Kiểu số"] == "bf16"
+    if key in ("gtx16", "gtx10", "cpu"):
+        assert all(r["Kiểu số"] == "fp32" and r["Kênh cuối"] == "không" for r in rows)
+
+
+def test_estimates_follow_card_order():
+    f = gp.FAMILIES
+    for m in ("compact", "rrdb", "dat2", "gfpgan"):
+        ts = [gp.est_seconds(f[k], m) for k in ("rtx50", "rtx40", "rtx30", "rtx20", "gtx16", "gtx10", "cpu")]
+        assert ts == sorted(ts), m

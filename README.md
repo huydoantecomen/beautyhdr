@@ -176,6 +176,11 @@ có thì điện thoại tự xử lý trên máy. Mở **Beauty HDR - Máy ch�
   sm_75 trở lên). Thêm gói **cuda_old** (PyTorch CUDA 12.6) ở BeautyHDR.exe và `build_windows.ps1 -Flavor cuda_old`;
   BeautyHDR.exe tự chọn theo tên card và hỏi chuyển nếu máy GTX 10 đã lỡ cài bản GPU thường. App không còn liệt kê card
   mà bản PyTorch đang cài không chạy được (trước đây chạy là lỗi "no kernel image"), mà ghi lý do.
+- Tăng tốc theo card × model: model tích chập (compact, RealPLKSR, x4plus) ở fp16/bf16 trên card có Tensor Core (RTX 20
+  trở lên) xếp dữ liệu kênh cuối (channels_last, ảnh ra không đổi; ép `NETANH_CHANNELS_LAST=0|1`). Model mặt GFPGAN,
+  RestoreFormer chạy thử bf16 trên RTX 30 trở lên (fp16 bị loại: GFPGAN fp16 lệch 91 mức xám, đo trên CPU), ra NaN thì
+  tự về fp32. Làm thư mục từ 3 ảnh trên NVIDIA: bật cuDNN tự chọn thuật toán (`NETANH_CUDNN_BENCHMARK=0` để tắt). Bảng
+  **Khuyến nghị theo card…** có thêm bảng từng model (kiểu số, kênh cuối, cỡ ô, thời gian ước lượng) cho card của máy.
 - Intel Arc / Iris Xe (gói xpu từ 0.14.1) giữ fp32, cắt ô theo bộ nhớ; AMD chưa có gói cài sẵn (ROCm hoặc DirectML tự cài
   từ mã nguồn), thử nghiệm.
 - Đo trên card thật: **Trợ giúp → Đo tốc độ card…** hoặc `NetAnh.exe --do-gpu` (`python app.py --do-gpu`, thêm `--nhanh`):

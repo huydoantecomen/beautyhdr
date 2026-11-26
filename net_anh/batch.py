@@ -58,6 +58,15 @@ class BatchRunner:
         self._stop.set()
 
     def run(self, items: Sequence[Any], work: Callable[[Any, Loaded], Any]) -> None:
+        bench = _cudnn_benchmark_on(self.engines, len(items))
+        try:
+            self._run(items, work)
+        finally:
+            if bench is not None:
+                import torch
+                torch.backends.cudnn.benchmark = bench
+
+    def _run(self, items: Sequence[Any], work: Callable[[Any, Loaded], Any]) -> None:
         q: queue.Queue = queue.Queue(maxsize=self.prefetch)
 
         def reader():
@@ -135,6 +144,21 @@ class BatchRunner:
             self._saver.shutdown(wait=True)
         if failure:
             raise failure[0]
+
+
+def _cudnn_benchmark_on(engines: Sequence[Any], n_items: int) -> bool | None:
+    """Từ 3 ảnh trở lên trên NVIDIA: bật cuDNN tự chọn thuật toán nhanh nhất theo cỡ ô (gpu_profile.cudnn_benchmark).
+    Trả về giá trị cũ để trả lại sau lô (ảnh lẻ trong giao diện không phải chờ cuDNN đo), None nếu không đổi."""
+    dev = getattr(engines[0], "dev", None)
+    if n_items < 3 or dev is None:
+        return None
+    from . import gpu_profile
+    if not gpu_profile.cudnn_benchmark(getattr(dev, "kind", "")):
+        return None
+    import torch
+    old = torch.backends.cudnn.benchmark
+    torch.backends.cudnn.benchmark = True
+    return old
 
 
 def _drain(q: queue.Queue) -> None:
