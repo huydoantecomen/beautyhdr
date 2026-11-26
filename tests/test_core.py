@@ -1443,3 +1443,34 @@ def test_non_cuda_gpu_error_falls_back_to_cpu(monkeypatch):
     out, rep = eng.process(img, Settings(mode="portrait", upscale=1))
     assert calls == ["xpu", "cpu"] and eng.dev.kind == "cpu" and eng.gpu_failed
     assert any("GPU lỗi" in n for n in rep.notes) and not rep.ai_fallback and rep.device.startswith("CPU")
+
+
+@pytest.mark.skipif(weights.status("esrgan_compact") != "ready", reason="chưa tải model AI")
+def test_contrast_works_in_ai_modes():
+    """Audit 0.15.2: thanh Tương phản (CLAHE) trước đây chỉ chạy ở mức 1 và Ảnh cũ; mức 2–6 không đổi gì."""
+    rng = np.random.default_rng(1)
+    img = (cv2.GaussianBlur(rng.integers(0, 255, (96, 96, 3), dtype=np.uint8), (0, 0), 3) * 0.4 + 100).astype(np.uint8)
+    e = Enhancer(device="cpu")
+    base = Settings(mode="upscale", upscale=2, tone=0.0, exposure=0.0, wb=0.0, skin_tone=0.0, deblur=1.0)
+    a, _ = e.process(img, base)
+    b, _ = e.process(img, base.with_(contrast=1.0))
+    assert b.astype(np.float32).std() > a.astype(np.float32).std() + 1
+
+
+def test_gui_keeps_hidden_level_fields(monkeypatch, tmp_path):
+    """Audit 0.15.2: mức 2 của ảnh cũ đặt sr_denoise = 1 (khử hạt mạnh); giao diện từng bỏ mất vì không có ô cho nó."""
+    pytest.importorskip("PySide6")
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    from net_anh import gui
+    from net_anh.levels import level_settings
+    w = gui.MainWindow()
+    s = level_settings(2, Settings(mode="old", upscale=2))
+    assert s.sr_denoise == 1.0
+    w._apply_settings(s)
+    assert w.settings().sr_denoise == 1.0
+    w.close()
+    app.processEvents()
