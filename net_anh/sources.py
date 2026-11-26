@@ -31,7 +31,7 @@ from .settings import Settings
 SOURCES = (
     ("local", "Trên máy này"),
     ("server", "Máy chủ GPU (Beauty HDR)"),
-    ("api", "API ngoài (fal.ai, Stability, Replicate)"),
+    ("api", "API ngoài (trả phí)"),
 )
 DEFAULT_PORT = 8765
 POLL_SECONDS = 1.0

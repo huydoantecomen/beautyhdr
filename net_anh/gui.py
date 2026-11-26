@@ -2477,7 +2477,6 @@ class MainWindow(QMainWindow):
         self._set_pair((self.cb_vivid, self.cb_vivid2), on)
         if not on:
             self._set_pair((self.cb_ai_color, self.cb_ai_color2), False)
-        self._to_custom()
         self.say("Nâng màu cảnh ảnh cũ: " + ("bật" if on else "tắt"))
 
     def _ai_color_toggled(self, on: bool):
@@ -2487,7 +2486,6 @@ class MainWindow(QMainWindow):
         self._set_pair((self.cb_ai_color, self.cb_ai_color2), on)
         if on:
             self._set_pair((self.cb_vivid, self.cb_vivid2), True)
-        self._to_custom()
         self.say("Tô màu AI cho cảnh: " + ("bật (DDColor)" if on else "tắt"))
 
     # ----- nguồn xử lý -----
