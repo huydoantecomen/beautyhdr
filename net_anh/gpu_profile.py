@@ -50,6 +50,9 @@ FAMILIES: dict[str, Family] = {f.key: f for f in (
            "(PyTorch CUDA 12.6): bản GPU thường không còn chạy trên Pascal.", vram_common=(2, 4, 6, 8, 11)),
     Family("maxwell", "GeForce GTX 900 / 750 (Maxwell)", "GTX 750 Ti, 950, 960, 970, 980", ("fp32",), False, 3,
            "thử nghiệm", "Card rất cũ, ít bộ nhớ: dùng model nhẹ. Cần bản GPU cho card đời cũ.", vram_common=(2, 4)),
+    Family("kepler", "GeForce GTX 600 / 700 (Kepler) và cũ hơn", "GTX 660, 760, 770, 780, GT 710, GT 730",
+           ("fp32",), False, 1, "chưa hỗ trợ",
+           "PyTorch không còn bản nào chạy trên Kepler (từ 2023): app dùng CPU. Nên nâng cấp card.", vram_common=()),
     Family("nvidia", "NVIDIA (dòng khác)", "Quadro, Tesla, card trạm", ("fp16", "fp32"), False, 15, "thử nghiệm",
            "Chọn theo thế hệ chip khi đọc được; fp16 có tự kiểm.", vram_common=()),
     Family("amd_rocm", "AMD Radeon qua ROCm", "RX 7600–7900, RX 9060–9070 (ROCm trên Linux, bản xem trước trên Windows)",
@@ -87,15 +90,28 @@ def nvidia_family(name: str, cc: tuple[int, int] | None = None) -> Family:
             return FAMILIES["volta"]
         if major == 6:
             return FAMILIES["gtx10"]
-        if major < 6:
+        if major == 5:
             return FAMILIES["maxwell"]
+        if major < 5:
+            return FAMILIES["kepler"]
     m = re.search(r"RTX\s*(?:PRO\s*)?([2-5])0[5-9]0", n)
     if m:
         return FAMILIES[f"rtx{m[1]}0"]
-    if re.search(r"GTX\s*10[5-8]0|MX\s*[1-3][1-5]0|TITAN\s*X(?!.*RTX)", n):
+    # card trạm: RTX PRO … Blackwell, RTX … Ada, RTX A4000 (Ampere), Quadro RTX (Turing), Quadro P (Pascal), M (Maxwell), K (Kepler)
+    if re.search(r"BLACKWELL", n):
+        return FAMILIES["rtx50"]
+    if re.search(r"RTX\s*\d+\s*ADA|\bL4\b|L40", n):
+        return FAMILIES["rtx40"]
+    if re.search(r"RTX\s*A\d{3,4}|\bA[1-9]0{1,2}\b|\bA100\b", n):
+        return FAMILIES["rtx30"]
+    if re.search(r"QUADRO\s*RTX|\bT4\b", n):
+        return FAMILIES["rtx20"]
+    if re.search(r"GTX\s*10[5-8]0|MX\s*[1-3][1-5]0|TITAN\s*XP|GT\s*10[3-9]0|QUADRO\s*P\d|TESLA\s*P\d", n):
         return FAMILIES["gtx10"]
-    if re.search(r"GTX\s*(7[5-9]|9[5-8])0", n):
+    if re.search(r"GTX\s*(75\d|9[5-8]0)|TITAN\s*X\b|QUADRO\s*M\d|TESLA\s*M\d", n):
         return FAMILIES["maxwell"]
+    if re.search(r"GTX\s*(6\d0|7[0-46-9]0)\b|\bGT\s*[67]\d0\b|QUADRO\s*K\d|GTX\s*TITAN(?!\s*X)|TESLA\s*K\d", n):
+        return FAMILIES["kepler"]
     if "TITAN V" in n or "V100" in n:
         return FAMILIES["volta"]
     return FAMILIES["nvidia"]
@@ -299,22 +315,22 @@ def recommendation(fam: Family, vram_gb: float = 0.0) -> dict[str, str]:
     def tiles(v: float) -> str:
         return f"{v:g} GB: {auto_tile('compact', v * 0.9, v, fast)} / {auto_tile('dat2', v * 0.9, v, dat)} px"
 
-    if fam.key == "cpu":
-        tile, level = "400 px", "mức 1–5 (model nhẹ); mức 6 rất chậm"
+    if fam.key in ("cpu", "kepler"):
+        tile, level = "400 px (chạy CPU)", "mức 1–5 (model nhẹ); mức 6 rất chậm"
     elif sizes:
         tile = " · ".join(tiles(v) for v in sizes)
         lo = min(sizes)
         level = "mức 1–6" if lo >= 6 else f"mức 1–6 từ 6 GB; {lo:g} GB nên mức 1–5"
     else:
         tile, level = "theo bộ nhớ đọc được, không đọc được thì 400 px", "mức 1–5; mức 6 chậm"
-    big = fam.key not in ("cpu", "amd_dml", "intel_igpu", "apple", "intel_arc") and any(v >= 11 for v in sizes or (12,))
+    big = fam.key not in ("cpu", "kepler", "amd_dml", "intel_igpu", "apple", "intel_arc") and any(v >= 11 for v in sizes or (12,))
     batch = "2 ảnh song song khi ≥ 11 GB VRAM, 16 GB RAM, 8 luồng" if big else "1 ảnh, đọc/ghi file song song"
     return {"Dòng card": fam.label, "Ví dụ": fam.examples, "Kiểu số (thử theo thứ tự)": prec,
             "Cắt ô (compact / DAT-2)": tile,
             "Nên dùng": level, "Hàng loạt": batch, "Mức hỗ trợ": fam.support, "Ghi chú": fam.note}
 
 
-TABLE_ORDER = ("rtx50", "rtx40", "rtx30", "rtx20", "gtx16", "gtx10", "maxwell", "intel_arc", "intel_igpu",
+TABLE_ORDER = ("rtx50", "rtx40", "rtx30", "rtx20", "gtx16", "gtx10", "maxwell", "kepler", "intel_arc", "intel_igpu",
                "amd_rocm", "amd_dml", "apple", "cpu")
 
 

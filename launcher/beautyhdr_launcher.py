@@ -66,13 +66,27 @@ def adapter_names() -> list[str]:
     return [ln.strip() for ln in r.stdout.splitlines() if ln.strip() and not bad.search(ln)]
 
 
-LEGACY_NVIDIA = re.compile(r"gtx\s*(10[5-8]0|9[5-8]0|7[5-9]0)|\bmx\s*[1-3][1-5]0|\bgt\s*10[3-9]0|titan x(p)?\b", re.I)
+# Pascal / Maxwell: GTX 10, GTX 900, GTX 750 (Ti), MX1xx–3xx, GT 1030, Titan X / Xp, Quadro P / M, Tesla P / M
+LEGACY_NVIDIA = re.compile(r"gtx\s*(10[5-8]0|9[5-8]0|75\d)|\bmx\s*[1-3][1-5]0|\bgt\s*10[3-9]0|titan\s*x(p)?\b"
+                           r"|quadro\s*[pm]\d|tesla\s*[pm]\d", re.I)
+# Kepler và cũ hơn: GTX 600, GTX 760–780, GT 6xx / 7xx, GTX Titan (đời đầu), Quadro K, Tesla K: không bản PyTorch nào chạy
+TOO_OLD_NVIDIA = re.compile(r"gtx\s*(6\d0|7[0-46-9]0)\b|\bgt\s*[4-7]\d0\b|gtx\s*titan(?!\s*x)|quadro\s*k\d|tesla\s*k\d", re.I)
+
+
+def _nvidia_names(names: list[str]) -> list[str]:
+    return [n for n in names if re.search(r"nvidia|geforce|quadro|titan|tesla", n, re.I)]
+
+
+def nvidia_too_old(names: list[str]) -> bool:
+    """Mọi card NVIDIA trên máy đều là Kepler hoặc cũ hơn: chỉ chạy được CPU."""
+    nv = _nvidia_names(names)
+    return bool(nv) and all(TOO_OLD_NVIDIA.search(n) for n in nv)
 
 
 def nvidia_legacy(names: list[str]) -> bool:
     """Card NVIDIA đời Pascal / Maxwell (GTX 10, GTX 900, MX1xx–3xx): PyTorch CUDA 12.8 trở lên không chạy trên các
-    dòng này, cần gói cuda_old (CUDA 12.6). Máy có cả card mới và card cũ thì theo card mới."""
-    nv = [n for n in names if re.search(r"nvidia|geforce|quadro|titan", n, re.I)]
+    dòng này, cần gói cuda_old (CUDA 12.6). Máy có cả card mới và card cũ thì theo card mới; card Kepler bỏ qua."""
+    nv = [n for n in _nvidia_names(names) if not TOO_OLD_NVIDIA.search(n)]
     return bool(nv) and all(LEGACY_NVIDIA.search(n) for n in nv)
 
 
@@ -82,7 +96,9 @@ def recommend_flavor(names: list[str], nvidia_smi: bool, available: set[str]) ->
     thì rơi về cpu (card cũ không rơi về cuda: cuda không chạy trên card cũ)."""
     low = [n.lower() for n in names]
     if nvidia_smi or any("nvidia" in n or "geforce" in n for n in low):
-        if nvidia_legacy(names):
+        if nvidia_too_old(names):
+            pass  # Kepler: không gói GPU nào chạy, xét tiếp card Intel trên máy (laptop), không có thì CPU
+        elif nvidia_legacy(names):
             if "cuda_old" in available:
                 return "cuda_old", "NVIDIA đời cũ"
         elif "cuda" in available:

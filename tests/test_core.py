@@ -807,7 +807,9 @@ def test_extra_sr_model_runs_tiled_and_falls_back(tmp_path, monkeypatch):
     assert "thay cho" in rep.bg_model and "compact" in rep.bg_model
 
 
-def test_hardware_estimate_and_warnings():
+def test_hardware_estimate_and_warnings(monkeypatch):
+    import torch
+    monkeypatch.setattr(torch.version, "cuda", None)  # máy giả lập: bản cài CPU (torch PyPI ở máy kiểm là bản CUDA)
     from net_anh import hardware
     from net_anh.hardware import Gpu, Machine
     m = hardware.machine()
@@ -1387,8 +1389,10 @@ def test_gui_deshine_checkbox_shared(monkeypatch, tmp_path):
     app.processEvents()
 
 
-def test_gpu_vendors_and_advice():
+def test_gpu_vendors_and_advice(monkeypatch):
     """0.14.1: nhận diện hãng card từ tên, lời khuyên theo hãng, đọc danh sách card Windows (bỏ card ảo)."""
+    import torch
+    monkeypatch.setattr(torch.version, "cuda", None)  # máy giả lập: bản cài CPU (torch PyPI ở máy kiểm là bản CUDA)
     from net_anh import hardware
 
     G = hardware.Gpu

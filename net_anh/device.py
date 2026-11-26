@@ -105,7 +105,16 @@ def pick_device(preference: str = "auto") -> DeviceInfo:
     devices = list_devices()
     if preference == "cpu":
         return devices[-1]
-    gpus = [d for d in devices if d.kind != "cpu"]
+    gpus = best_first([d for d in devices if d.kind != "cpu"])
     if gpus:
         return gpus[0]
     return devices[-1]
+
+
+_KIND_ORDER = {"cuda": 0, "xpu": 1, "mps": 2, "directml": 3}
+
+
+def best_first(gpus: list[DeviceInfo]) -> list[DeviceInfo]:
+    """Máy nhiều card (laptop Intel + NVIDIA, máy có card cũ và card mới): card nhanh nhất trước. CUDA trước XPU trước
+    DirectML; cùng loại thì dòng card nhanh hơn (gpu_profile.Family.speedup), rồi nhiều bộ nhớ hơn."""
+    return sorted(gpus, key=lambda d: (_KIND_ORDER.get(d.kind, 9), -d.family.speedup, -d.vram_gb))

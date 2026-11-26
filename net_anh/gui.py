@@ -26,7 +26,7 @@ from .analysis import Analysis, recommend
 from . import gpu_profile
 from .batch import BatchRunner, extra_engines
 from .batch import workers_for as batch_workers_for
-from .device import UNSUPPORTED, list_devices
+from .device import UNSUPPORTED, best_first, list_devices
 from . import hardware
 from .history import History
 from .levels import BG_MODELS, FACE_MODELS, LEVELS, auto_level, auto_upscale, level_for, level_settings, models_needed
@@ -451,7 +451,7 @@ class CardsDialog(QDialog):
         self.setWindowTitle("Khuyến nghị theo card")
         self.resize(1180, 520)
         devs = getattr(parent, "_devices", [])
-        mine = next((d for d in devs if d.kind != "cpu"), None)
+        mine = next(iter(best_first([d for d in devs if d.kind != "cpu"])), None)
         mine_key = mine.family.key if mine is not None else "cpu"
         rows = gpu_profile.table()
         head = QLabel(self._head(parent, mine))
@@ -2530,7 +2530,7 @@ class MainWindow(QMainWindow):
 
     def _fill_devices(self):
         """Tự động / GPU / CPU. GPU không dùng được (không có, hoặc bản cài chỉ có CPU) vẫn hiện nhưng xám, kèm lý do."""
-        gpu = next((d for d in self._devices if d.kind != "cpu"), None)
+        gpu = next(iter(best_first([d for d in self._devices if d.kind != "cpu"])), None)
         cpu = self._devices[-1]
         self.device.blockSignals(True)
         self.device.clear()
@@ -2556,7 +2556,7 @@ class MainWindow(QMainWindow):
 
     def _device_changed(self, *_):
         want = self.device.currentData()
-        gpu = next((d for d in self._devices if d.kind != "cpu"), None)
+        gpu = next(iter(best_first([d for d in self._devices if d.kind != "cpu"])), None)
         use = gpu if (want != "cpu" and gpu is not None) else self._devices[-1]
         txt = "Đang dùng: " + use.name
         if use.kind != "cpu":

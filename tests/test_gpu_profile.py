@@ -39,7 +39,8 @@ from net_anh.device import DeviceInfo
     ("NVIDIA GeForce RTX 5060", None, "rtx50"),
     ("NVIDIA GeForce GTX 1080 Ti", None, "gtx10"),
     ("NVIDIA GeForce GTX 960", None, "maxwell"),
-    ("NVIDIA Quadro P2000", None, "nvidia"),
+    ("NVIDIA Quadro P2000", None, "gtx10"),
+    ("NVIDIA Tesla K80", None, "kepler"),
 ])
 def test_nvidia_family(name, cc, key):
     assert gp.nvidia_family(name, cc).key == key
@@ -437,3 +438,85 @@ def test_gui_folder_batch_two_workers(monkeypatch, tmp_path):
     assert any("2 ảnh song song" in m for m in msgs)
     w.close()
     app.processEvents()
+
+
+# ---------------------------------------------------------------- kịch bản từng đời card (docs: bảng kịch bản)
+
+@pytest.mark.parametrize("names, smi, flavor", [
+    (["NVIDIA GeForce RTX 5090"], True, "cuda"),
+    (["NVIDIA GeForce RTX 4060 Laptop GPU", "Intel(R) UHD Graphics"], True, "cuda"),  # laptop lai: theo NVIDIA
+    (["NVIDIA GeForce RTX 3060"], True, "cuda"),
+    (["NVIDIA GeForce RTX 2060 SUPER"], True, "cuda"),
+    (["NVIDIA GeForce GTX 1660 Ti"], True, "cuda"),
+    (["NVIDIA GeForce GTX 1650"], True, "cuda"),
+    (["NVIDIA GeForce GTX 1060 6GB"], True, "cuda_old"),
+    (["NVIDIA GeForce GTX 1050 Ti"], True, "cuda_old"),
+    (["NVIDIA GeForce MX150", "Intel(R) UHD Graphics 620"], True, "cuda_old"),
+    (["NVIDIA GeForce GT 1030"], True, "cuda_old"),
+    (["NVIDIA GeForce GTX 970"], True, "cuda_old"),
+    (["NVIDIA GeForce GTX 750 Ti"], True, "cuda_old"),
+    (["NVIDIA Quadro P2000"], True, "cuda_old"),
+    (["NVIDIA RTX A4000"], True, "cuda"),
+    (["NVIDIA GeForce GTX 760"], True, "cpu"),  # Kepler: không bản GPU nào chạy
+    (["NVIDIA GeForce GT 730"], True, "cpu"),
+    (["NVIDIA GeForce GTX 780", "Intel(R) Iris(R) Xe Graphics"], True, "xpu"),  # Kepler + Iris Xe: dùng Intel
+    (["NVIDIA GeForce GTX 1060 6GB", "NVIDIA GeForce RTX 3060"], True, "cuda"),  # card mới thắng
+    (["NVIDIA GeForce GTX 760", "NVIDIA GeForce GTX 1070"], True, "cuda_old"),  # bỏ qua Kepler
+    (["NVIDIA GeForce RTX 3070"], False, "cuda"),  # chưa cài driver: vẫn chọn gói GPU (app nhắc cài driver)
+    (["Intel(R) Arc(TM) B580 Graphics"], False, "xpu"),
+    (["Intel(R) Arc(TM) Graphics"], False, "xpu"),  # Core Ultra
+    (["Intel(R) Iris(R) Xe Graphics"], False, "xpu"),
+    (["Intel(R) UHD Graphics 630"], False, "cpu"),
+    (["AMD Radeon RX 7900 XTX"], False, "cpu"),
+    (["AMD Radeon(TM) Graphics", "NVIDIA GeForce RTX 4050 Laptop GPU"], True, "cuda"),
+    (["Microsoft Basic Display Adapter"], False, "cpu"),
+    ([], False, "cpu"),
+])
+def test_install_scenarios(names, smi, flavor):
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location("bl", Path(__file__).parents[1] / "launcher" / "beautyhdr_launcher.py")
+    bl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bl)
+    names = [n for n in names if "microsoft" not in n.lower()]  # adapter_names() bỏ card ảo
+    assert bl.recommend_flavor(names, smi, {"cpu", "cuda", "cuda_old", "xpu"})[0] == flavor
+
+
+@pytest.mark.parametrize("name, key", [
+    ("NVIDIA GeForce GTX 760", "kepler"), ("NVIDIA GeForce GT 730", "kepler"), ("NVIDIA Quadro K2200", "kepler"),
+    ("NVIDIA GeForce GTX 750 Ti", "maxwell"), ("NVIDIA GeForce GTX TITAN X", "maxwell"),
+    ("NVIDIA TITAN Xp", "gtx10"), ("NVIDIA Quadro P2000", "gtx10"), ("NVIDIA GeForce GT 1030", "gtx10"),
+    ("NVIDIA Quadro RTX 4000", "rtx20"), ("NVIDIA RTX A4000", "rtx30"), ("NVIDIA RTX 4000 Ada Generation", "rtx40"),
+    ("NVIDIA RTX PRO 6000 Blackwell", "rtx50"),
+])
+def test_name_only_families(name, key):
+    assert gp.nvidia_family(name).key == key
+
+
+def test_runtime_scenarios(monkeypatch):
+    """Máy nhiều card: chọn card nhanh nhất; Kepler (cc 3.x) không có trong bản PyTorch nào nên không được liệt kê."""
+    from net_anh import device
+
+    assert gp.nvidia_family("NVIDIA GeForce GTX 780", (3, 5)).key == "kepler"
+    cards = [SimpleNamespace(name="NVIDIA GeForce GTX 1050", total_memory=4 * 1024**3, major=6, minor=1),
+             SimpleNamespace(name="NVIDIA GeForce RTX 3060", total_memory=12 * 1024**3, major=8, minor=6),
+             SimpleNamespace(name="NVIDIA GeForce GTX 780", total_memory=3 * 1024**3, major=3, minor=5)]
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 3)
+    monkeypatch.setattr(torch.cuda, "get_device_properties", lambda i: cards[i])
+    monkeypatch.setattr(torch.cuda, "get_arch_list", lambda: ["sm_50", "sm_60", "sm_61", "sm_75", "sm_86"])
+    best = device.pick_device("auto")
+    assert best.family.key == "rtx30" and str(best.device) == "cuda:1"
+    assert [n for n, _ in device.UNSUPPORTED] == ["NVIDIA GeForce GTX 780"]
+    assert device.pick_device("cpu").kind == "cpu"
+
+
+def test_driver_and_kepler_advice(monkeypatch):
+    monkeypatch.setattr(torch.version, "cuda", "12.8")
+    g = hardware.Gpu("NVIDIA GeForce RTX 3060", 12, False)
+    assert "driver" in hardware.advice(g)
+    k = hardware.Gpu("NVIDIA GeForce GTX 770", 2, False)
+    assert "Kepler" in hardware.advice(k)
+    monkeypatch.setattr(torch.version, "cuda", None)
+    assert "chọn bản GPU NVIDIA" in hardware.advice(g)

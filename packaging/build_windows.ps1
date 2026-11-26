@@ -35,11 +35,16 @@ $env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 if (-not $CapNhat -and -not $FlavorGiven -and $env:CI -ne "true") {
     $nv = $null
     try { $nv = Get-CimInstance Win32_VideoController -ErrorAction Stop | Where-Object { $_.Name -match "NVIDIA" } | Select-Object -First 1 } catch { }
+    # Kepler (GTX 600, GTX 760-780, GT 6xx/7xx, Quadro K): không bản PyTorch GPU nào còn chạy, dùng bản CPU
+    if ($nv -and $nv.Name -match "GTX\s*(6\d0|7[0-46-9]0)\b|\bGT\s*[4-7]\d0\b|GTX\s*TITAN(?!\s*X)|Quadro\s*K\d|Tesla\s*K\d") {
+        Write-Host "Card $($nv.Name) quá cũ cho AI trên GPU (đời Kepler): tạo bản CPU." -ForegroundColor Yellow
+        $nv = $null
+    }
     if ($nv) {
         Write-Host "Máy có card $($nv.Name). Bản GPU NVIDIA nhanh hơn khoảng 10 lần nhưng nặng hơn (khoảng 3 GB, bộ cài chia thành vài file)." -ForegroundColor Yellow
         $ans = Read-Host "Tạo bản GPU NVIDIA? Gõ Enter để chọn GPU, hoặc gõ C rồi Enter để chọn bản CPU"
         # GTX 10 / 900, MX1xx–3xx (Pascal, Maxwell): PyTorch CUDA 12.8 trở lên bỏ các dòng này, dùng bản CUDA 12.6
-        $old = $nv.Name -match "GTX\s*(10[5-8]0|9[5-8]0|7[5-9]0)|MX\s*[1-3][1-5]0|GT\s*10[3-9]0|TITAN X(p)?\b"
+        $old = $nv.Name -match "GTX\s*(10[5-8]0|9[5-8]0|75\d)|MX\s*[1-3][1-5]0|GT\s*10[3-9]0|TITAN\s*X(p)?\b|Quadro\s*[PM]\d|Tesla\s*[PM]\d"
         $Flavor = if ($ans -match "^[cC]") { "cpu" } elseif ($old) { "cuda_old" } else { "cuda" }
     }
 }
@@ -49,7 +54,7 @@ if (-not $CapNhat -and -not $FlavorGiven -and $env:CI -ne "true") {
 if ($Flavor -eq "cuda" -and $env:CI -ne "true") {
     $nvs = @()
     try { $nvs = @(Get-CimInstance Win32_VideoController -ErrorAction Stop | Where-Object { $_.Name -match "NVIDIA" } | ForEach-Object { $_.Name }) } catch { }
-    $legacy = "GTX\s*(10[5-8]0|9[5-8]0|7[5-9]0)|MX\s*[1-3][1-5]0|GT\s*10[3-9]0|TITAN X(p)?\b"
+    $legacy = "GTX\s*(10[5-8]0|9[5-8]0|75\d)|MX\s*[1-3][1-5]0|GT\s*10[3-9]0|TITAN\s*X(p)?\b|Quadro\s*[PM]\d|Tesla\s*[PM]\d"
     if ($nvs.Count -gt 0 -and @($nvs | Where-Object { $_ -notmatch $legacy }).Count -eq 0) {
         Write-Host "Card $($nvs[0]) là đời cũ (Pascal/Maxwell): dùng bản GPU cho card đời cũ (PyTorch CUDA 12.6)." -ForegroundColor Yellow
         $Flavor = "cuda_old"

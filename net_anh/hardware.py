@@ -52,9 +52,16 @@ class Gpu:
 
 def advice(g: Gpu) -> str:
     """Vì sao card này chưa dùng được và làm gì (hiện ở ô Thiết bị, cảnh báo và Quản lý model)."""
-    if g.vendor == "nvidia" and g.legacy:
+    if g.vendor == "nvidia" and g.legacy and not str(getattr(torch.version, "cuda", "") or "").startswith("12.6"):
         return (f"Máy có {g.name} (đời Pascal/Maxwell): PyTorch bản GPU mới không còn chạy trên dòng này. Mở lại "
                 "BeautyHDR.exe và chọn bản GPU cho card đời cũ (giữ nguyên model).")
+    if g.vendor == "nvidia" and g.family.key == "kepler":
+        return (f"Máy có {g.name} (đời Kepler): PyTorch không còn bản nào chạy AI trên dòng card này, app dùng CPU. "
+                "Muốn nhanh hơn cần card từ GTX 750 Ti / GTX 900 trở lên.")
+    if g.vendor == "nvidia" and getattr(torch.version, "cuda", None):
+        return (f"Máy có {g.name} và bản GPU đã cài nhưng chưa dùng được card: thường do driver NVIDIA quá cũ hoặc chưa "
+                "cài. Cập nhật driver mới nhất từ nvidia.com (bản GPU thường cần driver 570 trở lên, bản cho card đời cũ "
+                "cần 560 trở lên) rồi mở lại app.")
     if g.vendor == "nvidia":
         return (f"Máy có {g.name} nhưng bản đang cài chỉ chạy CPU. Mở lại BeautyHDR.exe và chọn bản GPU NVIDIA "
                 "để dùng card (giữ nguyên model).")
