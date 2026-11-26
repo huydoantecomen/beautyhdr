@@ -58,7 +58,8 @@ MAX_QUEUE = 8  # việc chờ tối đa (cả đang chạy)
 KEEP_SECONDS = 15 * 60  # giữ kết quả để điện thoại lấy lại
 MAX_FAILS, LOCK_SECONDS = 5, 60
 LEVEL_NAMES = {"auto": "Tự động", 1: "Nhẹ", 2: "Vừa", 3: "Rõ", 4: "Rất rõ", 5: "Tối đa", 6: "Cao nhất"}
-FEATURES = ("restore", "bg", "subject", "styles", "deshine")  # tham số thêm của POST /api/v1/jobs (từ 0.10.2; deshine từ 0.13.0)
+FEATURES = ("restore", "bg", "subject", "styles", "deshine", "engine")  # tham số thêm của POST /api/v1/jobs
+# (từ 0.10.2; deshine từ 0.13.0; engine từ 0.16.0: engine=<id> consent=1 guard=0|1, danh sách ở info["engines"])
 MAX_STYLES_CHARS = 8192
 IMAGE_EXT = {"image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png", "image/webp": ".webp",
              "image/bmp": ".bmp", "image/tiff": ".tif"}
@@ -180,6 +181,14 @@ class Job:
     quality: int
     device: str
     extra: dict = field(default_factory=dict)  # thông số thêm (khôi phục ảnh cũ, đổi nền, preset đối tượng)
+    engine: str = "local"  # nguồn xử lý: local hoặc id API ngoài (providers.py)
+    guard: bool = True  # kiểm giữ khuôn mặt với kết quả API ngoài
+    stage: str = ""  # "" | guard (API ngoài đã trả ảnh) | fallback (API lỗi, xử lý bằng máy này)
+    src: object = None  # ảnh đã giải mã (numpy) khi qua API ngoài
+    ext_out: object = None
+    ext_seconds: float = 0.0
+    ext_error: str = ""
+    ext_ids: list = field(default_factory=list)
     created: float = field(default_factory=time.time)
     state: str = "queued"  # queued | running | done | error | cancelled
     progress: str = "Đang chờ"
@@ -199,7 +208,7 @@ class Job:
         return d
 
 
-def build_settings(eng, img, path: Path, level, phone_key: str, upscale: int):
+def build_settings(eng, img, path: Path | None, level, phone_key: str, upscale: int):
     """Thông số như GUI/CLI: phân tích ảnh → Tự động (sáng, ảnh cũ, CLAHE) → mức nét người dùng chọn → hãng máy."""
     from .analysis import recommend
     from .levels import level_settings
@@ -211,10 +220,12 @@ def build_settings(eng, img, path: Path, level, phone_key: str, upscale: int):
     if level != "auto":
         s = level_settings(int(level), s.with_(upscale=upscale), an)
         why = [f"mức {level} · {LEVEL_NAMES[int(level)]} do điện thoại chọn"] + why[1:]  # why[0]: mức Tự động
-    if phone_key == "auto" or phone_key not in PROFILES:
-        key, desc = detect(path)
-    else:
+    if phone_key != "auto" and phone_key in PROFILES:
         key, desc = phone_key, PROFILES[phone_key].label
+    elif path is None:  # ảnh đã giải mã ở bước API ngoài: không còn file để đọc EXIF
+        key, desc = "generic", "không đọc EXIF (ảnh chuyển từ bước API ngoài)"
+    else:
+        key, desc = detect(path)
     return s.with_(phone=key, wb=-1.0, skin_tone=-1.0), an, why, desc
 
 
@@ -261,17 +272,26 @@ def parse_extra(q: dict) -> dict:
 
 
 class Worker:
-    """Một luồng duy nhất giữ Enhancer (model nằm sẵn trong VRAM giữa các ảnh), xử lý lần lượt từng việc."""
+    """Một luồng duy nhất giữ Enhancer (model nằm sẵn trong VRAM giữa các ảnh), xử lý lần lượt từng việc.
 
-    def __init__(self, device: str = "auto", say: Say | None = None):
+    Việc gửi tới API ngoài (engine khác "local") chạy phần mạng ở luồng riêng để GPU không ngồi chờ; khi API trả ảnh,
+    việc quay lại hàng đợi này ở bước "guard" (kiểm giữ mặt bằng model của máy này). API lỗi → bước "fallback": xử lý
+    bằng pipeline máy này và ghi chú lý do, để điện thoại vẫn nhận được ảnh."""
+
+    def __init__(self, device: str = "auto", say: Say | None = None, engines: dict | None = None,
+                 guard_ids: float | None = None):
+        from . import providers
         from .pipeline import Enhancer
 
         self.say = say or (lambda m: None)
         self.eng = Enhancer(device)
+        self.engines = dict(engines or {})
+        self.guard_ids = providers.GUARD_IDS if guard_ids is None else guard_ids
         self.jobs: dict[str, Job] = {}
         self.order: list[str] = []  # việc chờ, theo thứ tự
         self.cv = threading.Condition()
         self.current: Job | None = None
+        self.ext_running = 0  # việc đang chờ API ngoài
         self.stopped = False
         threading.Thread(target=self._loop, name="net-anh-worker", daemon=True).start()
 
@@ -279,9 +299,13 @@ class Worker:
     def submit(self, job: Job) -> int:
         with self.cv:
             self._cleanup()
-            if len(self.order) + (1 if self.current else 0) >= MAX_QUEUE:
+            if len(self.order) + (1 if self.current else 0) + self.ext_running >= MAX_QUEUE:
                 raise OverflowError()
             self.jobs[job.id] = job
+            if job.engine != "local":
+                self.ext_running += 1
+                threading.Thread(target=self._external, args=(job,), name="net-anh-api", daemon=True).start()
+                return 0
             self.order.append(job.id)
             self.cv.notify()
             return self.position(job)
@@ -303,10 +327,11 @@ class Worker:
             if job.id in self.order:
                 self.order.remove(job.id)
                 job.state, job.progress, job.finished, job.data = "cancelled", "Đã huỷ", time.time(), b""
+                job.src = job.ext_out = None
 
     def busy(self) -> tuple[bool, int]:
         with self.cv:
-            return self.current is not None, len(self.order)
+            return self.current is not None, len(self.order) + self.ext_running
 
     def _cleanup(self):
         now = time.time()
@@ -330,12 +355,84 @@ class Worker:
                 with self.cv:
                     self.current = None
                     job.data = b""  # không giữ ảnh gốc của người dùng lâu hơn cần
+                    job.src = job.ext_out = None
                     job.finished = time.time()
 
-    def _run(self, job: Job):
+    @staticmethod
+    def _decode(job: Job):
+        """load_image cần file (kiểm tra định dạng, xoay theo EXIF): ghi tạm rồi xoá ngay. Trả (ảnh, đường dẫn tạm)."""
+        from .pipeline import load_image
+
+        fd, tmp = tempfile.mkstemp(suffix=job.ext, prefix="netanh_")
+        with os.fdopen(fd, "wb") as f:
+            f.write(job.data)
+        try:
+            return load_image(tmp), tmp
+        except Exception:
+            os.unlink(tmp)
+            raise
+
+    def _external(self, job: Job):
+        """Luồng phụ: gửi ảnh tới API ngoài. Xong → hàng đợi chính (guard); API lỗi → hàng đợi chính (fallback)."""
+        from . import providers
+        from .pipeline import ImageError
+
+        e = self.engines[job.engine]
+        job.state, job.progress = "running", f"Đang gửi tới {e.label}…"
+        self.say(f"Ảnh từ {job.device} → API ngoài {e.label} ({e.provider})")
+        nxt = None
+        t0 = time.perf_counter()
+        try:
+            img, tmp = self._decode(job)
+            os.unlink(tmp)
+            job.src = img
+            out = e.run(img, job.upscale, progress=lambda m: setattr(job, "progress", m), cancel=lambda: job.cancel)
+            job.ext_out, job.ext_seconds, nxt = out, round(time.perf_counter() - t0, 2), "guard"
+            job.progress = "Đang kiểm giữ khuôn mặt…"
+        except providers.ProviderCancelled:
+            job.state, job.progress = "cancelled", "Đã huỷ"
+        except ImageError as err:
+            job.state, job.error = "error", str(err)
+        except providers.ProviderError as err:
+            job.ext_error, nxt = f"{e.label} lỗi ({err.code}): {err}", "fallback"
+            job.progress = "API ngoài lỗi, chuyển sang xử lý bằng máy chủ…"
+            self.say(f"  {job.ext_error} → xử lý bằng máy này")
+        except Exception as err:  # lỗi bất ngờ ở bộ nối: vẫn trả ảnh bằng pipeline máy này
+            job.ext_error, nxt = f"{e.label} lỗi: {err.__class__.__name__}: {err}", "fallback"
+            self.say("  LỖI bộ nối API: " + traceback.format_exc(limit=3))
+        with self.cv:
+            self.ext_running -= 1
+            if nxt and not job.cancel and job.src is not None:
+                job.stage = nxt
+                self.order.append(job.id)
+                self.cv.notify()
+            else:
+                if job.cancel and job.state != "error":
+                    job.state, job.progress = "cancelled", "Đã huỷ"
+                job.data, job.src, job.ext_out, job.finished = b"", None, None, time.time()
+
+    def _finish(self, job: Job, res, report: dict, notes: list[str]):
         import cv2
 
-        from .pipeline import Cancelled, ImageError, load_image, resize_long
+        from .pipeline import resize_long
+
+        h, w = res.shape[:2]
+        if job.max_side and max(h, w) > job.max_side:
+            res = resize_long(res, job.max_side)
+            notes.append(f"Thu nhỏ còn cạnh dài {job.max_side} px theo yêu cầu của điện thoại")
+        job.progress = "Đang nén ảnh…"
+        ok, buf = cv2.imencode(".jpg", res, [cv2.IMWRITE_JPEG_QUALITY, job.quality])
+        if not ok:
+            raise IOError("không nén được ảnh JPEG")
+        job.result = buf.tobytes()
+        report.update(notes=notes, width=res.shape[1], height=res.shape[0])
+        job.report = report
+        job.state, job.progress = "done", "Xong"
+        self.say(f"  xong sau {report['seconds']:.1f} s ({report.get('device')}), {res.shape[1]}×{res.shape[0]}")
+
+    def _run(self, job: Job):
+        from . import providers
+        from .pipeline import Cancelled, ImageError
 
         job.state = "running"
         eng = self.eng
@@ -344,43 +441,34 @@ class Worker:
         t0 = time.perf_counter()
         tmp = None
         try:
-            # load_image cần file (kiểm tra định dạng, xoay theo EXIF, đọc EXIF hãng máy): ghi tạm rồi xoá ngay
-            fd, tmp = tempfile.mkstemp(suffix=job.ext, prefix="netanh_")
-            with os.fdopen(fd, "wb") as f:
-                f.write(job.data)
-            job.progress = "Đang phân tích ảnh…"
-            img = load_image(tmp)
-            s, an, why, phone_desc = build_settings(eng, img, Path(tmp), job.level, job.phone, job.upscale)
-            if job.extra:
-                s = s.with_(**job.extra)
-            eng._check()
-            self.say(f"Ảnh {img.shape[1]}×{img.shape[0]} từ {job.device}: mức {LEVEL_NAMES.get(job.level, job.level)}, "
-                     f"model mặt {s.face_model}, nền {s.sr_model}")
-            res, rep = eng.process(img, s)
-            notes = list(rep.notes)
-            h, w = res.shape[:2]
-            if job.max_side and max(h, w) > job.max_side:
-                res = resize_long(res, job.max_side)
-                notes.append(f"Thu nhỏ còn cạnh dài {job.max_side} px theo yêu cầu của điện thoại")
-            job.progress = "Đang nén ảnh…"
-            ok, buf = cv2.imencode(".jpg", res, [cv2.IMWRITE_JPEG_QUALITY, job.quality])
-            if not ok:
-                raise IOError("không nén được ảnh JPEG")
-            job.result = buf.tobytes()
-            from .levels import auto_level
-            job.report = {
-                "mode": rep.mode, "device": rep.device, "seconds": round(time.perf_counter() - t0, 2),
-                "faces_found": rep.faces_found, "faces_restored": rep.faces_restored, "ai_fallback": rep.ai_fallback,
-                "notes": notes,
-                "width": res.shape[1], "height": res.shape[0], "input_width": img.shape[1],
-                "input_height": img.shape[0],
-                "level": job.level if job.level != "auto" else auto_level(an)[0],
-                "face_model": s.face_model if s.mode in ("portrait", "old") else None, "bg_model": s.sr_model,
-                "phone": s.phone, "phone_desc": phone_desc, "reasons": why, "analysis": an.summary(),
-                "server": socket.gethostname(), "summary": rep.summary(),
-            }
-            job.state, job.progress = "done", "Xong"
-            self.say(f"  xong sau {job.report['seconds']:.1f} s ({rep.device}), {res.shape[1]}×{res.shape[0]}")
+            if job.stage == "guard":
+                e = self.engines[job.engine]
+                ids = providers.face_ids(eng, job.src, job.ext_out) if job.guard else []
+                low = [x for x in ids if x < self.guard_ids]
+                if not low:
+                    notes = [f"Xử lý bằng {e.label} (dịch vụ ngoài, {e.price})"]
+                    if ids:
+                        notes.append(f"Đã kiểm {len(ids)} khuôn mặt: giữ danh tính, IDS thấp nhất {min(ids):.2f}")
+                    elif job.guard:
+                        notes.append("Không thấy khuôn mặt để kiểm giữ danh tính")
+                    rep = {"mode": "external", "device": e.label, "engine": e.id, "engine_label": e.label,
+                           "seconds": round(job.ext_seconds + time.perf_counter() - t0, 2),
+                           "faces_found": len(ids), "faces_restored": 0, "ai_fallback": False, "ids": ids,
+                           "input_width": job.src.shape[1], "input_height": job.src.shape[0],
+                           "server": socket.gethostname(), "summary": f"{e.label} · {job.ext_seconds:.1f} s"}
+                    return self._finish(job, job.ext_out, rep, notes)
+                job.ext_error = (f"{e.label} làm đổi khuôn mặt (IDS {min(low):.2f} dưới ngưỡng {self.guard_ids:.2f}), "
+                                 "đã dùng kết quả của máy chủ")
+                job.ext_ids = ids
+                self.say("  " + job.ext_error)
+            if job.src is not None:
+                img = job.src
+                path = None
+            else:
+                job.progress = "Đang phân tích ảnh…"
+                img, tmp = self._decode(job)
+                path = tmp
+            self._local(job, img, path, t0)
         except (Cancelled, InterruptedError):
             job.state, job.progress = "cancelled", "Đã huỷ"
             self.say("  điện thoại đã huỷ")
@@ -398,6 +486,37 @@ class Worker:
                 except OSError:
                     pass
 
+    def _local(self, job: Job, img, path: str | None, t0: float):
+        """Pipeline của máy này. `path` = file tạm để đọc EXIF hãng máy (None khi ảnh đã giải mã ở bước API ngoài)."""
+        eng = self.eng
+        job.progress = "Đang phân tích ảnh…"
+        s, an, why, phone_desc = build_settings(eng, img, Path(path) if path else None, job.level, job.phone,
+                                                job.upscale)
+        if job.extra:
+            s = s.with_(**job.extra)
+        eng._check()
+        self.say(f"Ảnh {img.shape[1]}×{img.shape[0]} từ {job.device}: mức {LEVEL_NAMES.get(job.level, job.level)}, "
+                 f"model mặt {s.face_model}, nền {s.sr_model}")
+        res, rep = eng.process(img, s)
+        notes = list(rep.notes)
+        if job.ext_error:
+            notes.insert(0, job.ext_error)
+        from .levels import auto_level
+        report = {
+            "mode": rep.mode, "device": rep.device, "seconds": round(time.perf_counter() - t0, 2),
+            "faces_found": rep.faces_found, "faces_restored": rep.faces_restored, "ai_fallback": rep.ai_fallback,
+            "input_width": img.shape[1], "input_height": img.shape[0],
+            "level": job.level if job.level != "auto" else auto_level(an)[0],
+            "face_model": s.face_model if s.mode in ("portrait", "old") else None, "bg_model": s.sr_model,
+            "phone": s.phone, "phone_desc": phone_desc, "reasons": why, "analysis": an.summary(),
+            "server": socket.gethostname(), "summary": rep.summary(), "engine": "local",
+        }
+        if job.engine != "local":
+            report["engine_requested"] = job.engine
+            if job.ext_ids:
+                report["ids"] = job.ext_ids
+        self._finish(job, res, report, notes)
+
 
 # ---------------------------------------------------------------- HTTP
 
@@ -410,12 +529,20 @@ class ApiError(Exception):
 class Server:
     def __init__(self, host: str = "0.0.0.0", port: int = PORT, device: str = "auto", say: Say | None = None,
                  pairing: Pairing | None = None, name: str | None = None, allow_pair: bool = True,
-                 discovery: bool = True):
+                 discovery: bool = True, engines: dict | None = None, guard_ids: float | None = None):
+        from . import providers
+
         self.say = say or (lambda m: print(m, flush=True))
         self.pairing = pairing or Pairing(static_tokens=os.environ.get("NET_ANH_TOKENS", "").split(","))
         self.name = name or socket.gethostname()
         self.allow_pair = allow_pair
-        self.worker = Worker(device, self.say)
+        if engines is None:  # API ngoài đã có khoá trên máy chủ này (khoá không bao giờ gửi cho điện thoại)
+            cfg = providers.load_config()
+            engines = providers.engines(cfg)
+            guard_ids = providers.guard_threshold(cfg) if guard_ids is None else guard_ids
+        self.worker = Worker(device, self.say, engines, guard_ids)
+        if engines:
+            self.say("API ngoài sẵn sàng: " + ", ".join(e.label for e in engines.values()))
         self.httpd = ThreadingHTTPServer((host, port), self._handler())
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
@@ -436,7 +563,13 @@ class Server:
         return {"app": "netanh", "api": API, "version": __version__, "name": self.name, "device": dev.name,
                 "gpu": dev.kind != "cpu", "busy": running, "queue": waiting, "port": self.port,
                 "max_upload_mb": MAX_UPLOAD_MB, "levels": [1, 2, 3, 4, 5, 6], "pairing": self.allow_pair,
-                "features": list(FEATURES)}
+                "features": list(FEATURES), "engines": self.engines_public()}
+
+    def engines_public(self) -> list[dict]:
+        dev = self.worker.eng.dev
+        local = {"id": "local", "label": f"Máy chủ này ({dev.name})", "provider": "local", "external": False,
+                 "price": "miễn phí", "note": "Ảnh không rời máy chủ"}
+        return [local] + [e.public() for e in self.worker.engines.values()]
 
     # --- vòng chạy
     def serve_forever(self):
@@ -588,13 +721,23 @@ class Server:
                 if upscale not in (0, 1, 2, 4):
                     raise ApiError(400, "bad_upscale", "upscale phải là 0, 1, 2 hoặc 4")
                 extra = parse_extra(q)
+                engine = q.get("engine", "local") or "local"
+                if engine != "local":
+                    if engine not in srv.worker.engines:
+                        raise ApiError(400, "bad_engine", f"Máy chủ không có nguồn xử lý '{engine}'. Xem info['engines']")
+                    if q.get("consent") != "1":
+                        raise ApiError(400, "consent_required", "Cần người dùng đồng ý gửi ảnh tới dịch vụ ngoài "
+                                                                "(gửi consent=1 sau khi hỏi)")
+                guard = q.get("guard", "1")
+                if guard not in ("0", "1"):
+                    raise ApiError(400, "bad_guard", "guard phải là 0 hoặc 1")
                 data = self._body(MAX_UPLOAD_MB)
                 ext = _sniff_ext(data)
                 if ext is None:
                     raise ApiError(415, "bad_image", "Không phải ảnh JPG, PNG, WebP, BMP hay TIFF")
                 job = Job(id=uuid.uuid4().hex, data=data, ext=ext, level=level, phone=q.get("phone", "auto"),
                           upscale=upscale, max_side=max(0, max_side), quality=min(100, max(60, quality)),
-                          device=device, extra=extra)
+                          device=device, extra=extra, engine=engine, guard=guard == "1")
                 try:
                     pos = srv.worker.submit(job)
                 except OverflowError:
