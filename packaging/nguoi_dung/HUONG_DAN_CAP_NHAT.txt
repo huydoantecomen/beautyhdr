@@ -44,6 +44,14 @@ CÁCH LÀM (từ 0.15.1 không phải chép gói vào đúng thư mục nữa)
    (%LOCALAPPDATA%\Programs\NetAnh) và chạy thử bằng model có sẵn. Hiện chữ XONG màu xanh là được.
 6. Mở "Beauty HDR" từ menu Start như mọi khi. Menu Trợ giúp > Giới thiệu phải ghi PC 0.15.1.
 
+HAI KIỂU CÀI, APP TỰ NHẬN
+- Đã cài bằng file setup.exe: đóng gói lại và chép đè bản đã cài (như mô tả ở trên).
+- CHƯA cài, chạy thẳng bằng PC (thư mục ma-nguon có .venv và chay.bat): app chỉ ghi đè mã mới vào ma-nguon, cập nhật
+  thư viện Python còn thiếu trong .venv (nếu có mạng), kiểm rồi mở chay.bat. KHÔNG đóng gói, KHÔNG cần setup.exe, nhanh
+  (vài chục giây). Giữ nguyên .venv (torch), model, lịch sử, preset. Muốn ép kiểu này thì bấm CAP_NHAT_CHAY_THANG.bat.
+- Máy có cả hai: app hỏi cập nhật bản nào. Chưa cài gì (chưa có .venv): app báo chạy cai_dat.bat trong ma-nguon trước.
+Nên giải nén gói ra ngoài thư mục ma-nguon (ví dụ Desktop), đừng giải nén vào trong ma-nguon.
+
 App nhớ thư mục đã chọn, lần cập nhật sau sẽ gợi ý đúng thư mục đó. Cách cũ (chép cả gói vào thư mục bản cũ rồi bấm
 CAP_NHAT.bat ở đó) vẫn dùng được.
 
