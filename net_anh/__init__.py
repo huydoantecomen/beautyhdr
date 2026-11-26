@@ -1,5 +1,5 @@
 """Beauty HDR: phần mềm làm nét ảnh chạy cục bộ bằng GPU/CPU của PC."""
-__version__ = "0.15.1"
+__version__ = "0.15.2"
 
 
 def _utf8_streams() -> None:

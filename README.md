@@ -156,6 +156,19 @@ App Android bật **Chất lượng cao nhất** thì gửi ảnh tới PC này 
 có thì điện thoại tự xử lý trên máy. Mở **Beauty HDR - Máy chủ cho điện thoại** (menu Start), `may_chu.bat` hoặc
 `python -m net_anh.server`. Cài đặt, ghép nối, dùng ở ngoài qua Tailscale, API: [docs/MAY_CHU.md](docs/MAY_CHU.md).
 
+## Thay đổi ở 0.15.2
+
+- **Đổi nền làm lại mặt nạ** (`net_anh/backdrop.py`): trước đây mặt nạ gần như nhị phân ở độ phân giải ảnh đã phóng
+  (99,4 % điểm chỉ 0 hoặc 1) nên viền tóc, tay áo răng cưa, mất sợi tóc, còn viền sẫm và đốm trắng. Giờ: dải chuyển có
+  bề rộng tính theo kích thước ảnh (±0,5 % cạnh dài) ở mọi độ phân giải; alpha ở dải này tính theo phép chiếu màu
+  (điểm = α·người + (1−α)·nền, nền đã biết) rồi lọc dẫn hướng theo ảnh nên mép mềm đúng chỗ, không còn kéo giãn mạnh
+  làm mất tóc mảnh; gỡ ám nền ở viền bằng màu người sạch lan từ vùng đặc gần nhất; bụi rời trên phông vẫn bỏ nhưng
+  sợi tóc sát người được giữ. Áo gần màu phông nhưng có biên rõ giờ vẫn là người (cắt vùng nền ở cạnh rõ rồi nhận lại
+  mảnh nền đúng màu), trước đây cả cái áo bị xoá. Thêm test.
+- **4 bộ preset ảnh thẻ có sẵn trong app** (Nam trẻ, Nữ trẻ, Nam lớn tuổi, Nữ lớn tuổi): hiện ngay lần mở đầu ở ô
+  Preset theo đối tượng (Chuyên sâu) và ô Tông màu (Đơn giản), cập nhật cùng app, không sửa/xoá được (Tạo bản sao rồi sửa).
+  Bản chép nạp tay từ bản cũ: giống hệt thì tự dọn, đã sửa thì giữ dưới tên "(của bạn)". Không đụng bộ do người dùng tạo.
+
 ## Thay đổi ở 0.15.1 (sửa từ máy thật)
 
 - "Chọn GPU mà render lại dùng CPU": model AI vẫn chạy trên GPU (ô Nền ghi "(fp32)" chỉ khi chạy GPU), nhưng các bước

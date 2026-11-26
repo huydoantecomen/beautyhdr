@@ -1,6 +1,13 @@
-BEAUTY HDR 0.15.1: GÓI CẬP NHẬT (nhỏ, không tải lại model)
+BEAUTY HDR 0.15.2: GÓI CẬP NHẬT (nhỏ, không tải lại model)
 
-MỚI Ở BẢN 0.15.1: SỬA TỪ MÁY THẬT
+MỚI Ở BẢN 0.15.2
+
+- Đổi nền: viền tóc, tay áo, vai không còn răng cưa, lẹm, mất sợi tóc hay viền xanh sẫm; mép mềm tự nhiên ở cả ảnh phóng 2×/4×.
+  Áo gần màu phông không bị xoá nữa.
+- 4 bộ preset ảnh thẻ (Nam trẻ, Nữ trẻ, Nam lớn tuổi, Nữ lớn tuổi) có sẵn trong app, không cần Nạp từ file nữa:
+  chọn ở ô Preset theo đối tượng (Chuyên sâu) hoặc ô Tông màu (Đơn giản).
+
+CÓ TỪ BẢN 0.15.1: SỬA TỪ MÁY THẬT
 
 - Gói Cập nhật giải nén ở đâu cũng được: bấm CAP_NHAT.bat là app tự tìm bản cũ, hỏi chọn thư mục rồi ghi đè.
 - Khu tiến độ mới ở đáy cửa sổ: tên bước đang làm, thanh phần trăm to, thời gian đã chạy và còn lại, nút Huỷ.
@@ -27,9 +34,9 @@ Chưa chạy thử trên card thật: đã chạy test trên máy Linux (CPU), p
 Gói này chỉ có phần chương trình mới (khoảng 0,3 MB). KHÔNG chạy lại file NetAnh-…-setup.exe, KHÔNG tải lại model:
 model đã tải nằm trong thư mục cài đặt và được giữ nguyên.
 
-CÁCH LÀM (từ 0.15.1 không phải chép gói vào đúng thư mục nữa)
+CÁCH LÀM (từ 0.15.2 không phải chép gói vào đúng thư mục nữa)
 
-1. Giải nén file BeautyHDR-0.15.1-CapNhat.zip ra chỗ nào cũng được (ví dụ Desktop).
+1. Giải nén file BeautyHDR-0.15.2-CapNhat.zip ra chỗ nào cũng được (ví dụ Desktop).
 2. Đóng Beauty HDR (và cửa sổ "Máy chủ cho điện thoại" nếu đang mở).
 3. Mở thư mục vừa giải nén, bấm đúp CAP_NHAT.bat.
 4. App tự tìm bản cũ trên máy và hỏi: "Tìm thấy Beauty HDR 0.x ở ... Cập nhật thư mục này?"
@@ -42,7 +49,7 @@ CÁCH LÀM (từ 0.15.1 không phải chép gói vào đúng thư mục nữa)
 5. App ghi đè mã mới vào thư mục đó, GIỮ NGUYÊN: thư viện đã tải (ma-nguon\_build, có torch), model, lịch sử và
    preset. Rồi cửa sổ đen tự đóng gói lại chương trình (khoảng 5-10 phút), chép đè lên chỗ đã cài
    (%LOCALAPPDATA%\Programs\NetAnh) và chạy thử bằng model có sẵn. Hiện chữ XONG màu xanh là được.
-6. Mở "Beauty HDR" từ menu Start như mọi khi. Menu Trợ giúp > Giới thiệu phải ghi PC 0.15.1.
+6. Mở "Beauty HDR" từ menu Start như mọi khi. Menu Trợ giúp > Giới thiệu phải ghi PC 0.15.2.
 
 HAI KIỂU CÀI, APP TỰ NHẬN
 - Đã cài bằng file setup.exe: đóng gói lại và chép đè bản đã cài (như mô tả ở trên).

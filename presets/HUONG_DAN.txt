@@ -4,7 +4,7 @@ File:
   anh-the-4-nhom.netanh.json   cả 4 bộ trong một file (nạp một lần)
   anh-the-nam-tre / nu-tre / nam-gia / nu-gia .netanh.json   từng bộ riêng để chia sẻ
 
-Cách nạp: chế độ Chuyên sâu, cạnh ô bộ preset bấm "Quản lý…" > "Nạp từ file…" > chọn anh-the-4-nhom.netanh.json.
+Từ 0.15.2 4 bộ này đã có sẵn trong app, không cần nạp (file ở đây chỉ để gửi người khác). Cách nạp cũ: chế độ Chuyên sâu, cạnh ô bộ preset bấm "Quản lý…" > "Nạp từ file…" > chọn anh-the-4-nhom.netanh.json.
 
 Cách dùng cho một ảnh thẻ (chọn đúng nhóm của người trong ảnh, 2 chỗ):
   1. Ô bộ preset (cạnh nút Quản lý…): chọn "Ảnh thẻ · Nam trẻ" (hoặc Nữ trẻ, Nam lớn tuổi, Nữ lớn tuổi)
