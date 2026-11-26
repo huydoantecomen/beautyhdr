@@ -58,8 +58,9 @@ jobs:
         if: steps.gate.outputs.run == 'True'
         shell: pwsh
         run: |
-          $extra = @()
-          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.models }}" -ne "true") { $extra += "-NoModels" }
+          # splat bằng bảng băm: mảng chuỗi "-NoModels" bị PowerShell coi là giá trị vị trí (thành tham số -OutDir)
+          $extra = @{}
+          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.models }}" -ne "true") { $extra.NoModels = $true }
           ./packaging/build_windows.ps1 -Flavor ${{ matrix.flavor }} -Python python @extra
 
       - name: Tải lên kết quả
