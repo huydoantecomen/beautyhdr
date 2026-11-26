@@ -1422,6 +1422,12 @@ class MainWindow(QMainWindow):
         self.cb_restore = QCheckBox()
         self.cb_restore.setToolTip("Dò vết xước, nếp gãy, bụi rồi vá bằng LaMa; kéo lại màu phai; xoay ảnh nằm ngang. "
                                    "Tải thêm ~650 MB model ở lần đầu. Chậm hơn: nên có GPU NVIDIA.")
+        self.cb_ai_color = QCheckBox()
+        self.cb_ai_color.setToolTip("Dùng AI tô màu (DDColor) để đoán màu trang phục, cây cỏ: áo trắng ra trắng, jeans ra xanh. "
+                                    "Cần bật 'Nâng màu sặc sỡ cho cảnh'. Lần đầu tải thêm khoảng 912 MB; chậm hơn vài chục giây.")
+        self.cb_vivid = QCheckBox()
+        self.cb_vivid.setToolTip("Ảnh cũ chụp cảnh (nền không đồng màu, không phải ảnh đen trắng): nâng tông sặc sỡ hơn, da ít đổi. "
+                                 "Ảnh thẻ nền đồng màu và ảnh đen trắng được bỏ qua.")
         dmg_tip = ("Tô lên chỗ bị lá vàng, vết ố, rách che mất chi tiết. App vá chỗ đó (LaMa) rồi dựng lại mặt bị hỏng "
                    "(RestoreFormer++). Mặt nhỏ dưới ~60 px chỉ vá, không bịa thêm.")
         self.btn_damage = QPushButton("Vẽ vùng hỏng nặng…")
@@ -1691,6 +1697,8 @@ class MainWindow(QMainWindow):
         sec_detail.add("Khử nhiễu", self.sl_denoise, "nhieu hat")
         sec_detail.add("", self.cb_denoise_auto, "nhieu")
         sec_restore = Section("Khôi phục ảnh cũ", check=self.cb_restore, opened=False)
+        sec_restore.add("Nâng màu sặc sỡ cho cảnh", self.cb_vivid, "mau sac so canh tone ruc ro")
+        sec_restore.add("Tô màu AI cho cảnh (DDColor)", self.cb_ai_color, "to mau ai ddcolor trang phuc")
         sec_restore.add("", self.btn_damage, "vung hong la vang rach xuoc bui phai xoay cu")
         sec_bg = Section("Đổi nền", check=self.cb_bg, opened=False)
         swr = QWidget()
@@ -1926,6 +1934,8 @@ class MainWindow(QMainWindow):
         self.cb_detail_same.toggled.connect(lambda on: (self.sl_detail.setEnabled(not on), self._to_custom()))
         self.cb_lowlight.toggled.connect(self._to_custom)
         self.cb_restore.toggled.connect(self._to_custom)
+        self.cb_vivid.toggled.connect(self._to_custom)
+        self.cb_ai_color.toggled.connect(self._to_custom)
         self.btn_damage.clicked.connect(self._draw_damage)
         self.btn_damage2.clicked.connect(self._draw_damage)
         self.cb_keep_lips.toggled.connect(self._to_custom)
@@ -2272,7 +2282,7 @@ class MainWindow(QMainWindow):
 
     def _apply_settings(self, s: Settings):
         widgets = (self.mode, self.preset, self.scale, self.cb_denoise_auto, self.cb_lowlight, self.face_model,
-                   self.bg_model, self.cb_detail_same, self.cb_keep_lips, self.subject, self.cb_restore)
+                   self.bg_model, self.cb_detail_same, self.cb_keep_lips, self.subject, self.cb_restore, self.cb_vivid, self.cb_ai_color)
         for w in widgets:
             w.blockSignals(True)
         self.mode.setCurrentIndex(self.mode.findData(s.mode))
@@ -2288,6 +2298,8 @@ class MainWindow(QMainWindow):
         self.sl_tone.set(s.tone)
         self.cb_lowlight.setChecked(s.low_light)
         self.cb_restore.setChecked(s.repair > 0 or s.fade > 0 or s.auto_rotate)
+        self.cb_vivid.setChecked(s.scene_vivid > 0)
+        self.cb_ai_color.setChecked(s.scene_ai > 0)
         self.sl_fid.set(s.fidelity)
         self.cb_detail_same.setChecked(s.detail_fidelity is None)
         self.sl_detail.set(s.fidelity if s.detail_fidelity is None else s.detail_fidelity)
@@ -2325,7 +2337,8 @@ class MainWindow(QMainWindow):
                         face_styles=facestyle.styles_to_settings(self.preset_lib.get(self.preset_set.currentData())),
                         repair=1.0 if self.cb_restore.isChecked() else 0.0,
                         fade=1.0 if self.cb_restore.isChecked() else 0.0, auto_rotate=self.cb_restore.isChecked(),
-                        damage_mask=self.damage_path)
+                        damage_mask=self.damage_path, scene_vivid=1.0 if self.cb_vivid.isChecked() else 0.0,
+                        scene_ai=1.0 if self.cb_ai_color.isChecked() else 0.0)
 
     def _draw_damage(self):
         if self.src_img is None:

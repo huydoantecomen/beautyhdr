@@ -71,6 +71,10 @@ def build_settings(a, eng: Enhancer | None, img) -> tuple[Settings, str]:
         if not (s.repair > 0 or s.fade > 0):
             s = s.with_(repair=1.0, fade=1.0, auto_rotate=True)
     s = s.with_(fade_style=getattr(a, "fade_style", "giu_da"))
+    if getattr(a, "scene_vivid", None):
+        s = s.with_(scene_vivid=a.scene_vivid)
+    if getattr(a, "scene_ai", None):
+        s = s.with_(scene_ai=a.scene_ai)
     if getattr(a, "small_face_sr", False):
         s = s.with_(small_face_sr=True)
     if a.low_light:
@@ -142,6 +146,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-faces", type=int, default=24)
     p.add_argument("--fade-style", choices=["0.10", "giu_da"], default="giu_da",
                    help="phục hồi màu phai: giu_da (mặc định, giữ màu da và ánh sáng ấm có chủ ý) hoặc 0.10 (bản cũ)")
+    p.add_argument("--scene-vivid", type=float,
+                   help="ảnh cũ chụp cảnh (không phải ảnh thẻ nền đồng màu, không phải đen trắng): nâng tông sặc sỡ 0..1; "
+                        "chạy cùng bước khôi phục ảnh cũ")
+    p.add_argument("--scene-ai", type=float,
+                   help="cùng --scene-vivid: lấy màu từ AI tô màu DDColor 0..1 (tải 912 MB lần đầu)")
     p.add_argument("--small-face-sr", action="store_true",
                    help="mặt nhỏ trong ảnh nhóm: phóng AI vùng mặt trước khi dựng (thử nghiệm, ít bịa hơn nhưng ít nét)")
     p.add_argument("--tile", type=int, default=400, help="kích thước ô Real-ESRGAN, 0 = không chia")

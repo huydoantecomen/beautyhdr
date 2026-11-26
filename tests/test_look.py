@@ -17,7 +17,7 @@ def _portrait(skin=(150, 175, 215), bg=(200, 160, 60)):
     rng = np.random.default_rng(1)
     img = np.clip(img.astype(np.int16) + rng.normal(0, 6, img.shape), 0, 255).astype(np.uint8)
     for _ in range(30):
-        cv2.circle(img, (int(rng.integers(0, w)), int(rng.integers(0, 120))), 3, (120, 90, 40), -1)
+        cv2.circle(img, (int(rng.integers(0, w)), int(rng.integers(0, 120))), 3, (178, 142, 52), -1)
     labels = np.full((h, w), -1, np.int16)
     labels[60:320, 40:260] = 0
     cv2.ellipse(img, (150, 150), (80, 105), 0, 0, 360, (30, 40, 70), -1)  # tóc nâu đỏ
@@ -164,3 +164,39 @@ def test_gui_look_combo_shared(monkeypatch, tmp_path):
     assert any(not sec.isHidden() for sec in w.sections)
     w.close()
     app.processEvents()
+
+
+def _scene_with_skin_like_stone():
+    """Chân dung giả + nửa dưới là đá be cùng tông da và mảng váy kem: không phải da, không được đổi màu."""
+    img, labels = _portrait(bg=(205, 210, 200))
+    img[330:400, :] = (150, 175, 215)  # đá be cùng màu da, xa mặt
+    rng = np.random.default_rng(3)
+    img[330:400] = np.clip(img[330:400].astype(np.int16) + rng.normal(0, 7, img[330:400].shape), 0, 255).astype(np.uint8)
+    img[10:40, 235:295] = (205, 225, 235)  # váy kem nhạt (sắc độ nhỏ nhưng không phải trắng)
+    return img, labels
+
+
+def test_look_does_not_recolor_skin_like_or_cream_regions_far_from_face():
+    img, labels = _scene_with_skin_like_stone()
+    lk = look.Look(bg_clean=0.0, clean=0.8, tidy=0.6, contrast=0.0)  # contrast là đường cong toàn ảnh, có chủ ý
+    out, _ = look.apply(img, look.masks_from_labels(labels), lk)
+    for sl in (np.s_[335:395, 5:295], np.s_[12:38, 240:290]):
+        d = np.abs(out[sl].astype(np.int16) - img[sl].astype(np.int16)).mean()
+        assert d < 1.5, d
+
+
+def test_clean_backdrop_skips_textured_background():
+    rng = np.random.default_rng(0)
+    h, w = 900, 700
+    base = np.zeros((h, w, 3), np.float32)
+    for sc, amp in ((60, 40), (12, 35), (4, 25)):  # cây, lá: hoa văn ở nhiều tần số
+        n = cv2.resize(rng.random((h // sc + 2, w // sc + 2, 3)).astype(np.float32), (w, h), interpolation=cv2.INTER_CUBIC)
+        base += (n - 0.5) * amp
+    bg = np.clip(np.array([200, 215, 205], np.float32) + base, 0, 255).astype(np.uint8)
+    cv2.ellipse(bg, (350, 650), (160, 300), 0, 0, 360, (120, 140, 170), -1)
+    out, note = look.clean_backdrop(bg, 0.9, 3.0, None)
+    assert note == "" and np.array_equal(out, bg)
+    sky = np.clip(np.array([225, 230, 235], np.float32) + np.linspace(0, 12, h)[:, None, None]
+                  + rng.normal(0, 2, (h, w, 3)), 0, 255).astype(np.uint8)
+    cv2.ellipse(sky, (350, 650), (160, 300), 0, 0, 360, (120, 140, 170), -1)
+    assert look.clean_backdrop(sky, 0.9, 3.0, None)[1]  # phông trơn vẫn được làm phẳng

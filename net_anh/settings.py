@@ -87,6 +87,10 @@ class Settings:
     # Mặt nhỏ (hai mắt cách < 32 px): True = phóng AI vùng mặt rồi mới căn và dựng, ít bịa mắt xanh, tóc vàng hơn nhưng
     # ít nét hơn; False = như 0.10. Chưa bật mặc định: huy ưa bản dựng nhiều AI hơn bản giới hạn AI, chờ chấm vòng 2.
     small_face_sr: bool = False
+    # Ảnh cũ chụp cảnh (không phải ảnh thẻ nền đồng màu, không phải ảnh đen trắng): 0..1 nâng tông sặc sỡ hơn (độ rực,
+    # tương phản tông giữa), da được giữ ít đổi. Chỉ chạy khi bật khôi phục ảnh cũ. 0 = tắt (mặc định).
+    scene_vivid: float = 0.0
+    scene_ai: float = 0.0          # 0..1: ảnh cảnh cũ lấy màu từ AI tô màu DDColor (cần scene_vivid > 0, tải 912 MB)
     # Đường dẫn PNG mặt nạ vùng hỏng nặng do người dùng tô (trắng = hỏng): vá bằng LaMa rồi, nếu trúng mặt, dựng lại
     # mặt đó 100 % bằng model mặt trong vùng hỏng (nút "Vẽ vùng hỏng…", CLI --mask).
     damage_mask: str = ""

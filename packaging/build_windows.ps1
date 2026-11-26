@@ -258,6 +258,11 @@ try {
     Step "3/6 Đóng gói bằng PyInstaller"
     Exec $Py @("-m", "PyInstaller", "--noconfirm", "--clean", "--workpath", (Join-Path $Work "pyinstaller-$Flavor"),
                "--distpath", $DistRoot, "packaging\net_anh.spec")
+    # bộ preset mẫu (ảnh thẻ 4 nhóm) nằm cạnh NetAnh.exe: Quản lý… > Nạp từ file… > thư mục presets
+    $presetSrc = Join-Path $Root "presets"
+    if (Test-Path -LiteralPath $presetSrc) {
+        Copy-Item -LiteralPath $presetSrc -Destination (Join-Path $Dist "presets") -Recurse -Force
+    }
 
     if (-not $NoModels) {
         Step "4/6 Tải model AI (khoảng 620 MB, kiểm SHA-256; lần sau dùng lại bản đã tải)"

@@ -1,0 +1,82 @@
+{
+  "format": "net-anh-preset-set",
+  "version": 3,
+  "app": "Beauty HDR 0.14.1",
+  "sets": [
+    {
+      "id": "anh-the-nam-tre",
+      "name": "Ảnh thẻ · Nam trẻ",
+      "author": "Beauty HDR",
+      "note": "Ảnh thẻ nam 18–40: da sạch vừa, giữ vân da, môi tự nhiên (không tô đỏ), tóc đen, nền phẳng. Đo từ ảnh thẻ mẫu nam của huy.",
+      "created": "2026-11-26",
+      "styles": {
+        "child": {
+          "keep": 0.0,
+          "detail": 0.25,
+          "smooth": 0.2,
+          "glow": 0.0,
+          "bright": 0.05,
+          "warm": 0.0,
+          "matte": 0.3
+        },
+        "man": {
+          "keep": 0.0,
+          "detail": 0.25,
+          "smooth": 0.2,
+          "glow": 0.0,
+          "bright": 0.05,
+          "warm": 0.0,
+          "matte": 0.3
+        },
+        "woman": {
+          "keep": 0.0,
+          "detail": 0.25,
+          "smooth": 0.2,
+          "glow": 0.0,
+          "bright": 0.05,
+          "warm": 0.0,
+          "matte": 0.3
+        },
+        "elder": {
+          "keep": 0.0,
+          "detail": 0.25,
+          "smooth": 0.2,
+          "glow": 0.0,
+          "bright": 0.05,
+          "warm": 0.0,
+          "matte": 0.3
+        },
+        "adult": {
+          "keep": 0.0,
+          "detail": 0.25,
+          "smooth": 0.2,
+          "glow": 0.0,
+          "bright": 0.05,
+          "warm": 0.0,
+          "matte": 0.3
+        }
+      },
+      "look": {
+        "name": "Ảnh thẻ nam trẻ",
+        "skin_L": 72.0,
+        "skin_a": 9.0,
+        "skin_b": 14.5,
+        "skin": 0.6,
+        "skin_light": 0.45,
+        "even": 0.45,
+        "clean": 0.55,
+        "tidy": 0.35,
+        "lips_a": 22.0,
+        "lips_b": 13.0,
+        "lips": 0.25,
+        "hair": 0.6,
+        "white": 0.7,
+        "cool": 1.5,
+        "contrast": 0.5,
+        "range_target": 88.0,
+        "bg_clean": 0.9,
+        "bg_lift": 3.0
+      }
+    }
+  ]
+}

@@ -505,11 +505,147 @@ def face_damage_weight(enh, helper, idx: int) -> np.ndarray | None:
 
 # ---------- chạy cả chuỗi ----------
 
+PLAIN_BG_SPREAD = 6.0  # ΔE: phông ảnh thẻ đồng màu nhỏ hơn mức này (đo: 0,06 ảnh thẻ số; ảnh scan có viền giấy 9,6–15)
+VIVID_WARM = 16.0  # b* thêm tối đa cho điểm ít màu ở vùng tối/tông giữa (lá cây, đá, đất): ảnh in phai ngả xanh xám
+VIVID_GAIN = 1.4  # độ rực thêm tối đa cho màu nhạt (vibrance)
+VIVID_HI_CAST = 0.45  # phần ám vàng của vùng sáng (giấy ố, áo trắng ngả vàng) được gỡ
+
+
+def scene_check(img: np.ndarray) -> str:
+    """"" nếu là ảnh cảnh có màu; ngược lại lý do bỏ qua (ảnh đen trắng, ảnh nền đồng màu kiểu ảnh thẻ)."""
+    from . import backdrop
+    if is_mono(img):
+        return "Ảnh đen trắng: không nâng màu cảnh"
+    bd = backdrop.detect(img)
+    if bd is not None and bd.spread < PLAIN_BG_SPREAD:  # viền giấy trắng của ảnh scan có độ lệch ~10, phông thẻ phẳng ~0–3
+        return "Nền đồng màu (kiểu ảnh thẻ): không nâng màu cảnh"
+    return ""
+
+
+def scene_vivid(img: np.ndarray, amount: float = 1.0, faces=None) -> tuple[np.ndarray, str]:
+    """Khôi phục màu cho ảnh cũ chụp cảnh (thay fade_restore) và nâng tông sặc sỡ. Đo trên ảnh in phai cho trước ảnh
+    đích của huy (bộ 4 cô gái trong công viên, tools/… không kèm ảnh): sửa của fade_restore (kéo giãn từng kênh) làm
+    bóng tối ngả xanh lam, cây thành xanh tím, áo trắng ngả vàng chanh. Bản này:
+      1. gỡ ám của vùng sáng theo từng kênh (kênh yếu nhất của điểm trắng được nâng, càng sáng càng nhiều), bóng tối giữ nguyên;
+      2. kéo giãn độ sáng (L) rồi đưa tông giữa về ~0,32;
+      3. điểm ít màu ở bóng tối/tông giữa (lá cây, đất, đá) ấm lên và hơi xanh lá, trừ xanh lam (quần jeans, trời);
+         độ rực kiểu vibrance (màu nhạt tăng nhiều), da giảm 60 %; ám vàng của vùng sáng bớt 45 %.
+    Bỏ qua ảnh đen trắng và ảnh có nền đồng màu (scene_check). Trả (ảnh, ghi chú); ghi chú rỗng nếu không làm gì."""
+    from . import color
+    amount = float(np.clip(amount, 0, 1))
+    why = scene_check(img)
+    if amount <= 1e-3 or why:
+        return img, why
+    f = img.astype(np.float32) / 255
+    y = f @ np.array([0.114, 0.587, 0.299], np.float32)
+    hi = np.percentile(f.reshape(-1, 3), 99.0, axis=0)
+    g = np.clip(hi.max() / np.maximum(hi, 1e-3), 1.0, 2.5)
+    w = (np.clip((y - 0.2) / 0.5, 0, 1)[..., None] ** 1.5) * amount
+    f = np.clip(f * (1 + (g - 1) * w), 0, 1)
+    lab = cv2.cvtColor(f, cv2.COLOR_BGR2LAB)
+    L = lab[..., 0]
+    lo, hi_l = np.percentile(L, [0.5, 99.7])
+    L2 = np.clip((L - lo) / max(hi_l - lo, 20.0), 0, 1)
+    gam = float(np.clip(np.log(0.32) / np.log(max(float(np.median(L2)), 1e-3)), 0.5, 1.0))
+    lab[..., 0] = L + (100 * L2 ** gam - L) * amount
+    out8 = (np.clip(cv2.cvtColor(lab, cv2.COLOR_LAB2BGR), 0, 1) * 255 + 0.5).astype(np.uint8)
+    # độ rực / ấm lên
+    skin = color.skin_mask(out8)
+    ch = cheek_mask(out8.shape[:2], faces)
+    if ch is not None:
+        skin = np.maximum(skin, cv2.GaussianBlur(ch.astype(np.float32), (0, 0), 3))
+    lab = cv2.cvtColor(out8.astype(np.float32) / 255, cv2.COLOR_BGR2LAB)
+    L, a, b = lab[..., 0], lab[..., 1], lab[..., 2]
+    C = np.hypot(a, b)
+    wm = np.clip(1 - C / 22, 0, 1) * np.clip((b + 12) / 8, 0, 1) * np.clip(1 - L / 70, 0, 1) ** 0.7 * (1 - 0.7 * skin) * amount
+    b2 = b + VIVID_WARM * wm
+    a2 = a - 0.6 * VIVID_WARM * wm
+    hi_m = np.clip((L - 55) / 25, 0, 1) * np.clip((b - 6) / 8, 0, 1) * (1 - skin) * amount
+    b2 = b2 - VIVID_HI_CAST * hi_m * b2
+    k = 1 + VIVID_GAIN * amount * np.clip(1 - np.hypot(a2, b2) / 55, 0, 1) * (1 - 0.6 * skin)
+    lab[..., 1], lab[..., 2] = a2 * k, b2 * k
+    out = (np.clip(cv2.cvtColor(lab, cv2.COLOR_LAB2BGR), 0, 1) * 255 + 0.5).astype(np.uint8)
+    return out, (f"Cảnh: gỡ ám vùng sáng (kênh B/G/R ×{g[0]:.2f}/{g[1]:.2f}/{g[2]:.2f}), tông giữa → 0,32, "
+                 f"lá cây/đất ấm lên, độ rực {amount * 100:.0f} %")
+
+
+AI_COLOR_GAIN = 2.0    # a, b của DDColor hơi nhạt (và còn qua tông/làm nét sau đó) (C trung bình ~13 so với ảnh đích ~24)
+
+
+# Ảnh đã đủ màu (ảnh điện thoại, ảnh màu còn tươi) mà tô lại bằng DDColor thì màu ra loè loẹt, tay chân đỏ (thử 0.14.2 trên
+# ảnh chụp màn hình 4 người: sắc độ trung bình 10,8). Ảnh in phai của huy (4 cô gái) chỉ 6,3. Dưới FADED_C tô đủ, trên VIVID_C bỏ qua.
+AI_FADED_C = 7.5
+AI_VIVID_C = 10.0
+
+
+def ai_color_weight(src: np.ndarray) -> tuple[float, float]:
+    """(hệ số 0..1 cho Tô màu AI, sắc độ trung bình Lab của ảnh nguồn)."""
+    lab = cv2.cvtColor(src[..., :3], cv2.COLOR_BGR2LAB).astype(np.float32)
+    c = float(np.hypot(lab[..., 1] - 128, lab[..., 2] - 128).mean())
+    return float(np.clip((AI_VIVID_C - c) / (AI_VIVID_C - AI_FADED_C), 0, 1)), c
+
+
+def scene_ai_color(enh, src: np.ndarray, vivid: np.ndarray, amount: float, faces=None) -> np.ndarray:
+    """Lấy a, b từ DDColor (đoán màu theo ngữ nghĩa: áo trắng, jeans, lá cây) thay cho a, b của phép chỉnh màu toàn ảnh;
+    độ sáng lấy từ `vivid`. Da (và má) giữ pha 70 % màu cũ vì DDColor hay cho da nhợt hồng."""
+    from . import color
+    from .colorize import predict_ab
+    amount = float(np.clip(amount, 0, 1))
+    ab = predict_ab(enh, src)
+    if ab.shape[:2] != vivid.shape[:2]:
+        ab = cv2.resize(ab, (vivid.shape[1], vivid.shape[0]), interpolation=cv2.INTER_LINEAR)
+    lab = cv2.cvtColor(vivid.astype(np.float32) / 255, cv2.COLOR_BGR2LAB)
+    skin = color.skin_mask(vivid)
+    ch = cheek_mask(vivid.shape[:2], faces)
+    if ch is not None:
+        skin = np.maximum(skin, cv2.GaussianBlur(ch.astype(np.float32), (0, 0), 3))
+    w = amount * (1 - 0.7 * skin)[..., None]
+    new = ab * AI_COLOR_GAIN
+    lab[..., 1:] = lab[..., 1:] * (1 - w) + new * w
+    return (np.clip(cv2.cvtColor(lab, cv2.COLOR_LAB2BGR), 0, 1) * 255 + 0.5).astype(np.uint8)
+
+
+def scene_finish(img: np.ndarray, amount: float = 1.0) -> np.ndarray:
+    """Bước cuối cho ảnh cảnh đã qua scene_vivid (chạy sau làm nét AI, tông, màu): rõ nếp ở cả vùng sáng (áo trắng), nén
+    vùng rất sáng cho khỏi cháy phẳng, thêm độ rực cho màu nhạt (da và vùng tối giữ), và kéo màu theo cạnh của độ sáng
+    (lọc dẫn hướng) để màu áo không tràn ra ngoài viền. Nguồn ảnh nhỏ, áo gần như phẳng thì chỉ cải thiện nhẹ (nếp áo
+    không có trong ảnh gốc, model nào cũng không dựng lại được)."""
+    from . import color
+    from .backdrop import _guided
+    amount = float(np.clip(amount, 0, 1))
+    if amount <= 1e-3:
+        return img
+    h, w = img.shape[:2]
+    size = max(h, w)
+    lab = cv2.cvtColor(img.astype(np.float32) / 255, cv2.COLOR_BGR2LAB)
+    L0 = lab[..., 0]
+    base = color.guided_smooth(L0, max(4, int(0.018 * size)))
+    mid = np.clip(1 - np.abs(L0 / 55 - 1) ** 2, 0.35, 1)
+    L = L0 + 0.9 * amount * mid * (L0 - base)
+    L = np.where(L > 78, 78 + (L - 78) * (1 - 0.45 * amount), L)
+    lab[..., 0] = np.clip(L, 0, 100)
+    skin = color.skin_mask(img) * (lab[..., 0] > 38)
+    lab = color.vibrance(lab, 0.3 * amount, skin)
+    # quần áo màu ấm (đỏ, cam, vàng) là chỗ bị phai và nhạt nhiều nhất: tăng riêng, da (kể cả tay) giữ
+    C = np.hypot(lab[..., 1], lab[..., 2])
+    warm = np.clip((lab[..., 1] - 6) / 10, 0, 1) + np.clip((lab[..., 2] - 14) / 8, 0, 1) * (lab[..., 0] > 50)
+    k = 1 + 1.0 * amount * np.clip(warm, 0, 1) * np.clip(1 - C / 70, 0, 1) * (1 - skin)
+    lab[..., 1] *= k
+    lab[..., 2] *= k
+    r = max(4, int(0.0045 * size))
+    g = lab[..., 0] / 100
+    for c in (1, 2):
+        f = _guided(g, lab[..., c] / 128, r, 2e-3) * 128
+        lab[..., c] += (f - lab[..., c]) * 0.6 * amount
+    return (np.clip(cv2.cvtColor(lab, cv2.COLOR_LAB2BGR), 0, 1) * 255 + 0.5).astype(np.uint8)
+
+
 def run(enh, img: np.ndarray, repair: float, fade: float, rotate: bool, rep, mask_path: str = "",
-        style: str = "0.10") -> np.ndarray:
+        style: str = "0.10", vivid: float = 0.0, ai_color: float = 0.0) -> np.ndarray:
     """Làm sạch ảnh cũ. Ghi các bước đã làm vào rep.notes. Vùng người dùng tô (mask_path) luôn được vá, kể cả khi
     repair = 0, và được nhớ lại ở enh._repair_mask để bước làm nét mặt dựng lại mặt bị hỏng nặng."""
     enh._repair_mask = None
+    enh._scene_applied = False
     user = load_damage_mask(mask_path, img.shape[:2])
     if rotate:
         enh.say("Đang kiểm tra hướng ảnh…")
@@ -536,15 +672,27 @@ def run(enh, img: np.ndarray, repair: float, fade: float, rotate: bool, rep, mas
         else:
             rep.notes.append("Không thấy vết xước hay bụi đáng kể")
     enh._check()
-    if fade > 0:
+    if fade > 0 or vivid > 0:
         enh.say("Đang phục hồi màu phai…")
         faces = None
-        if style == "giu_da":
+        if style == "giu_da" or vivid > 0:
             try:
                 faces = [lm for _, lm in enh.detect_faces(img)]
             except Exception:
                 faces = None
-        img, note = (fade_restore(img, fade, faces=faces) if style == "giu_da" else fade_restore_v1(img, fade))
-        if note:
-            rep.notes.append(note.capitalize())
+        done = False
+        if vivid > 0:  # ảnh cảnh: khôi phục màu kiểu cảnh thay cho fade_restore (xem scene_vivid)
+            img2, note = scene_vivid(img, vivid, faces)
+            if note and note.startswith("Cảnh"):
+                if ai_color > 0:  # tô màu AI chạy cuối pipeline (pipeline.py), trên ảnh gốc đã vá
+                    enh._ai_src = img
+                    note += f", màu AI {ai_color * 100:.0f} %"
+                img, done = img2, True
+                enh._scene_applied = True
+            if note:
+                rep.notes.append(note)
+        if fade > 0 and not done:
+            img, note = (fade_restore(img, fade, faces=faces) if style == "giu_da" else fade_restore_v1(img, fade))
+            if note:
+                rep.notes.append(note.capitalize())
     return img

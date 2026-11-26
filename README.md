@@ -153,6 +153,19 @@ App Android bật **Chất lượng cao nhất** thì gửi ảnh tới PC này 
 có thì điện thoại tự xử lý trên máy. Mở **Beauty HDR - Máy chủ cho điện thoại** (menu Start), `may_chu.bat` hoặc
 `python -m net_anh.server`. Cài đặt, ghép nối, dùng ở ngoài qua Tailscale, API: [docs/MAY_CHU.md](docs/MAY_CHU.md).
 
+## Thay đổi ở 0.14.2 (màu cảnh ảnh cũ, Tô màu AI, preset ảnh thẻ; gộp sửa loang 0.14.1)
+
+- Gộp bản sửa loang màu tông mẫu (look.py: nền chỉ làm phẳng khi thật sự trơn, "da" theo màu chỉ quanh mặt, gỡ ám chỉ vùng trắng thật)
+  vào nhánh có BeautyHDR.exe (0.14.1 nhận diện card NVIDIA/AMD/Intel). Trước đây hai thay đổi này nằm ở hai nơi.
+- Khôi phục ảnh cũ, ô "Nâng màu sặc sỡ cho cảnh" (Chuyên sâu; Settings.scene_vivid, CLI --scene-vivid 0..1): ảnh cũ chụp cảnh
+  (nền không đồng màu) được gỡ ám vùng sáng, kéo sáng, ấm vùng tối/giữa và tăng độ rực; bỏ qua ảnh đen trắng và ảnh thẻ nền đồng màu.
+- Ô "Tô màu AI cho cảnh" (Settings.scene_ai, CLI --scene-ai, cần ô trên): DDColor (Apache-2.0, net_anh/colorize.py, archs/ddcolor_arch)
+  đoán lại màu theo ngữ nghĩa (áo trắng, quần jeans, cây xanh), ghép a, b ở cuối pipeline. Model 912 MB tải riêng ở lần đầu bật,
+  không nằm trong bộ model mặc định. Ảnh còn đủ màu (sắc độ Lab trung bình trên 10, như ảnh điện thoại) được bỏ qua vì tô lại ra loè loẹt;
+  ảnh phai dưới 7,5 tô đủ (restore.ai_color_weight). Ngưỡng mới chỉnh trên 1 ảnh mẫu; chưa có ở chế độ Đơn giản và Android.
+- Thư mục presets/: 4 bộ preset ảnh thẻ (nam/nữ, trẻ/lớn tuổi; bộ lớn tuổi không trẻ hoá) + HUONG_DAN.txt cách nạp
+  (Chuyên sâu > Quản lý… > Nạp từ file…). tools/id_preset_bench.py đo tuổi trước/sau.
+
 ## Thay đổi ở 0.13.1
 
 - Sửa lỗi sập `UnicodeEncodeError: 'charmap' codec can't encode character` khi chạy `python app.py --may-chu` (và mọi lệnh in chữ Việt)

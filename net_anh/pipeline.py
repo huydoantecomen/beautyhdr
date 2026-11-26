@@ -945,10 +945,13 @@ class Enhancer:
             if s.upscale == 4:
                 rep.notes.append(f"Ảnh nhỏ ({img.shape[1]}×{img.shape[0]} px): phóng 4× để ảnh ra đủ lớn")
         self._repair_mask = None
-        if s.repair > 0 or s.fade > 0 or s.auto_rotate or s.damage_mask:
+        self._scene_applied = False
+        self._ai_src = None
+        if s.repair > 0 or s.fade > 0 or s.auto_rotate or s.damage_mask or s.scene_vivid > 0:
             from . import restore
             try:
-                img = restore.run(self, img, s.repair, s.fade, s.auto_rotate, rep, s.damage_mask, s.fade_style)
+                img = restore.run(self, img, s.repair, s.fade, s.auto_rotate, rep, s.damage_mask, s.fade_style, s.scene_vivid,
+                                  s.scene_ai if s.scene_vivid > 0 else 0.0)
             except (Cancelled, InterruptedError):
                 raise
             except (weights.ModelError, OSError, RuntimeError, MemoryError) as e:
@@ -1022,6 +1025,21 @@ class Enhancer:
                 raise
             except Exception as e:  # không để lỗi tông mẫu làm mất cả kết quả
                 rep.notes.append(f"Không áp được tông mẫu ({e.__class__.__name__})")
+        if s.scene_vivid > 0 and getattr(self, "_scene_applied", False):
+            from . import restore
+            out = restore.scene_finish(out, s.scene_vivid)
+            src = getattr(self, "_ai_src", None)
+            if s.scene_ai > 0 and src is not None:
+                k, chroma = restore.ai_color_weight(src)
+                if k <= 0:
+                    rep.notes.append(f"Bỏ qua tô màu AI: ảnh còn đủ màu (sắc độ {chroma:.1f}), tô lại sẽ loè loẹt")
+            if s.scene_ai > 0 and src is not None and k > 0:
+                try:
+                    self.say("Đang tô màu AI (DDColor)…")
+                    out = restore.scene_ai_color(self, src, out, s.scene_ai * k)
+                except Exception as e:  # thiếu model/RAM: giữ bản chỉnh màu thường
+                    rep.notes.append(f"Không tô màu AI được: {e}")
+            self._ai_src = None
         if s.bg_color is not None:
             from . import backdrop
             try:
