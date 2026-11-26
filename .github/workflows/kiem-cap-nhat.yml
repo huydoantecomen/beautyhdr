@@ -39,6 +39,26 @@ jobs:
           $o3 = powershell -NoProfile -ExecutionPolicy Bypass -STA -File packaging\cap_nhat.ps1 -Flavor cuda -Target $old -NguonMoi "$env:GITHUB_WORKSPACE" 2>&1 | Out-String
           if ($o3 -notmatch "Flavor=cuda FlavorGiven=True") { throw "gọi như .bat: sai tham số: $o3" }
           Remove-Item Env:NETANH_KIEM_THAM_SO
+          # chạy thẳng từ mã nguồn (chưa cài setup.exe): .venv thật, chỉ bỏ pip (không cần mạng)
+          $dir = Join-Path $env:RUNNER_TEMP "chay thang\BeautyHDR-0.15.0-dev"
+          New-Item -ItemType Directory -Force -Path (Join-Path $dir "ma-nguon\net_anh") | Out-Null
+          Set-Content -LiteralPath (Join-Path $dir "ma-nguon\net_anh\__init__.py") -Value '__version__ = "0.15.0"'
+          Set-Content -LiteralPath (Join-Path $dir "ma-nguon\giu-lai.txt") -Value "model của tôi"
+          python -m venv (Join-Path $dir "ma-nguon\.venv")
+          # tự nhận (không có setup.exe, có .venv → chạy thẳng)
+          $o4 = powershell -NoProfile -ExecutionPolicy Bypass -STA -File packaging\cap_nhat.ps1 -Target $dir -NguonMoi "$env:GITHUB_WORKSPACE" -KhongMo -BoQuaPip 2>&1 | Out-String
+          Write-Host $o4
+          if ($o4 -notmatch "chạy bản 0\.15\.1" -or $o4 -notmatch "XONG") { throw "chạy thẳng (tự nhận) lỗi: $o4" }
+          if (-not (Test-Path -LiteralPath (Join-Path $dir "ma-nguon\giu-lai.txt"))) { throw "mất file riêng" }
+          # ép bằng CAP_NHAT_CHAY_THANG.bat (-Mode chay)
+          $o5 = powershell -NoProfile -ExecutionPolicy Bypass -STA -File packaging\cap_nhat.ps1 -Mode chay -Target $dir -NguonMoi "$env:GITHUB_WORKSPACE" -KhongMo -BoQuaPip 2>&1 | Out-String
+          if ($o5 -notmatch "chạy bản 0\.15\.1") { throw "chạy thẳng (-Mode chay) lỗi: $o5" }
+          # chưa cài, chưa có .venv: báo rõ cách làm
+          $trong = Join-Path $env:RUNNER_TEMP "chua-co-venv"
+          New-Item -ItemType Directory -Force -Path (Join-Path $trong "ma-nguon\net_anh") | Out-Null
+          Set-Content -LiteralPath (Join-Path $trong "ma-nguon\net_anh\__init__.py") -Value '__version__ = "0.15.0"'
+          $o6 = powershell -NoProfile -ExecutionPolicy Bypass -STA -File packaging\cap_nhat.ps1 -Target $trong -NguonMoi "$env:GITHUB_WORKSPACE" 2>&1 | Out-String
+          if ($o6 -notmatch "cai_dat\.bat") { throw "phải hướng dẫn chạy cai_dat.bat: $o6" }
           powershell -NoProfile -ExecutionPolicy Bypass -File packaging\cap_nhat.ps1 -Target (Join-Path $env:RUNNER_TEMP "khong-phai") -NguonMoi "$env:GITHUB_WORKSPACE" -NoBuild
           if ($LASTEXITCODE -eq 0) { throw "phải từ chối thư mục sai" }
           Write-Host "ĐẠT"

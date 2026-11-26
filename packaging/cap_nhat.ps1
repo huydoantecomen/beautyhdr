@@ -6,17 +6,26 @@
 # model (trong thư mục cài đặt và %LOCALAPPDATA%\NetAnh), lịch sử và preset (thư mục người dùng .net_anh).
 # Sau khi chép, chạy build_windows.ps1 -CapNhat của thư mục đó như trước (đóng gói lại, chép đè bản đã cài, tự kiểm).
 #
+# Hai kiểu cài đặt, tự nhận (hoặc ép bằng -Mode):
+#   cai  = đã cài bằng setup.exe: đóng gói lại và chép đè bản đã cài (build_windows.ps1 -CapNhat).
+#   chay = chạy thẳng từ mã nguồn (ma-nguon\.venv, chay.bat), không cài setup.exe: chỉ ghi đè mã, cập nhật thư viện
+#          Python còn thiếu trong .venv, kiểm rồi mở chay.bat. Giữ nguyên .venv, model, lịch sử, preset.
+#
 # Kiểm thử không cần hộp thoại: -KiemThu (CI Windows chạy, xem .github/workflows/kiem-cap-nhat.yml).
 param(
     [string]$Flavor = "",
     [string]$Target = "",          # bỏ qua hộp chọn (dòng lệnh, kiểm thử)
     [string]$NguonMoi = "",        # thư mục mã mới (mặc định: ma-nguon cạnh file .bat)
     [string[]]$TimTrong = @(),     # thư mục tìm bản cũ (mặc định: Desktop, Downloads, Documents, thư mục người dùng, ổ đĩa)
+    [ValidateSet("auto", "cai", "chay")] [string]$Mode = "auto",
+    [switch]$KhongMo,              # kiểu chay: không mở chay.bat sau khi cập nhật
+    [switch]$BoQuaPip,             # kiểu chay: không chạy pip (kiểm thử không cần mạng)
     [switch]$NoBuild,
     [switch]$KiemThu
 )
 $ErrorActionPreference = "Stop"
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+try { Add-Type -AssemblyName System.Windows.Forms } catch { }
 
 $Pkg = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # ...\BeautyHDR-x.y.z-CapNhat
 if (-not $NguonMoi) { $NguonMoi = Join-Path $Pkg "ma-nguon" }
@@ -131,6 +140,81 @@ function Choose-Root {
     }
 }
 
+function Test-Installed {
+    # Beauty HDR đã cài bằng setup.exe (khoá gỡ cài đặt của Inno Setup, hoặc thư mục mặc định có NetAnh.exe)
+    $sub = "Software\Microsoft\Windows\CurrentVersion\Uninstall\{6B0F3E2A-8C1D-4F7E-9A51-2D7C3B9E4A10}_is1"
+    foreach ($path in @("HKCU:\$sub", "HKLM:\$sub", "HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{6B0F3E2A-8C1D-4F7E-9A51-2D7C3B9E4A10}_is1")) {
+        try {
+            $loc = (Get-ItemProperty -LiteralPath $path -ErrorAction Stop).InstallLocation
+            if ($loc -and (Test-Path -LiteralPath (Join-Path $loc "NetAnh.exe"))) { return $true }
+        } catch { }
+    }
+    return [bool]($env:LOCALAPPDATA -and (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA "Programs\NetAnh\NetAnh.exe")))
+}
+
+function Resolve-Mode([string]$root, [string]$want, [bool]$installed, [bool]$ask) {
+    # "cai" | "chay" | "none". Ép bằng -Mode; không thì theo những gì máy có: .venv (chạy thẳng) và bản cài setup.exe.
+    if ($want -ne "auto") { return $want }
+    $venv = Test-Path -LiteralPath (Join-Path $root "ma-nguon\.venv\Scripts\python.exe")
+    if ($venv -and -not $installed) { return "chay" }
+    if ($installed -and -not $venv) { return "cai" }
+    if ($venv -and $installed) {
+        if ($ask) {
+            $a = [System.Windows.Forms.MessageBox]::Show(
+                "Máy này vừa có bản đã cài (setup.exe) vừa có bản chạy thẳng từ mã nguồn (.venv) ở:`n`n$root`n`n" +
+                "Yes: cập nhật bản chạy thẳng (chay.bat)`nNo: cập nhật bản đã cài (setup.exe)`nCancel: thoát",
+                "Chọn bản cần cập nhật", "YesNoCancel", "Question")
+            if ($a -eq "Yes") { return "chay" }
+            if ($a -eq "No") { return "cai" }
+            return "none"
+        }
+        return "cai"
+    }
+    if (Test-Path -LiteralPath (Join-Path $root "ma-nguon\_build")) { return "cai" }
+    return "none"
+}
+
+function Invoke-Native([string]$exe, [string[]]$arguments) {
+    # Chạy lệnh ngoài và chuyển chữ ra màn hình; stderr của lệnh ngoài không được làm script dừng (PowerShell 5.1 coi là lỗi)
+    $old = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $exe @arguments 2>&1 | ForEach-Object { Write-Host $_ }
+        return $LASTEXITCODE
+    } finally { $ErrorActionPreference = $old }
+}
+
+function Update-Direct([string]$root) {
+    # Kiểu chạy thẳng: mã mới đã chép (Copy-Update). Cập nhật thư viện còn thiếu trong .venv, kiểm, mở chay.bat.
+    $src = Join-Path $root "ma-nguon"
+    $py = Join-Path $src ".venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $py)) {
+        throw "Chưa có môi trường .venv trong $src. Chạy cai_dat.bat ở đó trước (cài Python và thư viện), rồi bấm lại CAP_NHAT.bat."
+    }
+    $env:PYTHONUTF8 = "1"
+    if (-not $BoQuaPip) {
+        Write-Host "Cập nhật thư viện Python còn thiếu trong .venv (torch và model giữ nguyên)…"
+        $code = Invoke-Native $py @("-m", "pip", "install", "--disable-pip-version-check", "-q", "-r", (Join-Path $src "requirements.txt"))
+        if ($code -ne 0) {
+            Write-Host "Cảnh báo: pip báo lỗi (mã $code), có thể không có mạng. Bản mới vẫn chạy nếu thư viện đã đủ." -ForegroundColor Yellow
+        }
+    }
+    Push-Location -LiteralPath $src
+    try {
+        $out = (& $py -c "import net_anh; print(net_anh.__version__)" 2>&1 | Out-String).Trim()
+    } finally { Pop-Location }
+    $want = Get-Ver $src
+    if ($out -ne $want) { throw "Kiểm bản mới KHÔNG ĐẠT: Python trong .venv báo '$out', mong đợi $want." }
+    Write-Host "Đã kiểm: chương trình trong .venv chạy bản $out" -ForegroundColor Green
+    $bat = Join-Path $src "chay.bat"
+    if (-not $KhongMo -and (Test-Path -LiteralPath $bat)) {
+        Write-Host "Mở Beauty HDR (chay.bat)…"
+        Start-Process -FilePath $bat -WorkingDirectory $src
+    }
+    Write-Host ""
+    Write-Host "XONG. Beauty HDR chạy thẳng đã lên bản $out. Từ nay mở bằng chay.bat như mọi khi." -ForegroundColor Green
+}
+
 function Invoke-KiemThu {
     # Thư mục giả: bản cũ 0.14.2 có _build và file thư viện, gói mới; kiểm nhận thư mục, tìm, chép đè, giữ _build.
     $t = Join-Path ([IO.Path]::GetTempPath()) ("kiem_cap_nhat_" + [guid]::NewGuid().ToString("N").Substring(0, 8))
@@ -155,6 +239,23 @@ function Invoke-KiemThu {
     Check (Test-Path -LiteralPath (Join-Path $old "ma-nguon\packaging\build_windows.ps1")) "có build_windows.ps1 mới"
     Save-Root $old
     Check ((Get-Content -LiteralPath $script:SaveFile -Raw -Encoding UTF8).Trim() -eq $old) "ghi nhớ thư mục cho lần sau"
+    # nhận kiểu cập nhật
+    Check ((Resolve-Mode $old "chay" $false $false) -eq "chay") "ép -Mode chay"
+    Check ((Resolve-Mode $old "auto" $false $false) -eq "cai") "có _build, không .venv, chưa cài → cai (build sẽ báo cần cài)"
+    $direct = Join-Path $t "chay thang\BeautyHDR-0.15.0-dev"
+    New-Item -ItemType Directory -Force -Path (Join-Path $direct "ma-nguon\net_anh"), (Join-Path $direct "ma-nguon\.venv\Scripts") | Out-Null
+    Set-Content -LiteralPath (Join-Path $direct "ma-nguon\net_anh\__init__.py") -Value '__version__ = "0.15.0"' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $direct "ma-nguon\.venv\Scripts\python.exe") -Value "x"
+    Set-Content -LiteralPath (Join-Path $direct "ma-nguon\model.txt") -Value "giữ" -Encoding UTF8
+    Check ((Resolve-Mode $direct "auto" $false $false) -eq "chay") "có .venv, chưa cài → chay (chạy thẳng)"
+    Check ((Resolve-Mode $direct "auto" $true $false) -eq "cai") "vừa cài vừa .venv, không hỏi được → cai"
+    $none = Join-Path $t "trong"
+    New-Item -ItemType Directory -Force -Path (Join-Path $none "ma-nguon\net_anh") | Out-Null
+    Set-Content -LiteralPath (Join-Path $none "ma-nguon\net_anh\__init__.py") -Value '__version__ = "0.15.0"' -Encoding UTF8
+    Check ((Resolve-Mode $none "auto" $false $false) -eq "none") "chưa cài, chưa có .venv → none"
+    Copy-Update $direct
+    Check ((Get-Ver (Join-Path $direct "ma-nguon")) -eq (Get-Ver $NguonMoi)) "chạy thẳng: ghi đè mã mới"
+    Check ((Test-Path -LiteralPath (Join-Path $direct "ma-nguon\.venv\Scripts\python.exe")) -and (Test-Path -LiteralPath (Join-Path $direct "ma-nguon\model.txt"))) "chạy thẳng: giữ .venv và file riêng"
     Remove-Item -LiteralPath $t -Recurse -Force -ErrorAction SilentlyContinue
     if ($script:fail) { Write-Host "$($script:fail) kiểm tra LỖI"; exit 1 }
     Write-Host "Tất cả kiểm tra ĐẠT"; exit 0
@@ -182,6 +283,20 @@ try {
     Copy-Update $root
     Save-Root $root
     if ($NoBuild) { exit 0 }
+    $kind = Resolve-Mode $root $Mode (Test-Installed) $true
+    if ($kind -eq "none") {
+        if ($Mode -eq "auto" -and -not (Test-Installed)) {
+            throw ("Chưa thấy Beauty HDR đã cài (setup.exe) và cũng chưa có môi trường .venv ở $root\ma-nguon.`n" +
+                   "Chạy cai_dat.bat trong thư mục ma-nguon (chạy thẳng, không cần setup.exe) hoặc TAO_FILE_CAI_DAT.bat " +
+                   "(tạo file setup.exe), rồi bấm lại CAP_NHAT.bat. Mã mới đã được chép vào thư mục này rồi.")
+        }
+        Write-Host "Đã huỷ."; exit 1
+    }
+    if ($kind -eq "chay") {
+        Write-Host "Kiểu cập nhật: chạy thẳng từ mã nguồn (.venv, chay.bat), không đóng gói, không cài setup.exe." -ForegroundColor Green
+        Update-Direct $root
+        exit 0
+    }
     $build = Join-Path $root "ma-nguon\packaging\build_windows.ps1"
     # Bảng băm (không phải mảng): splat mảng truyền theo vị trí, "-CapNhat" rơi vào tham số đầu tiên (Flavor) → lỗi ValidateSet
     $buildArgs = @{ CapNhat = $true }
