@@ -84,6 +84,8 @@ Nhãn ParseNet facexlib đúng: 0 nền, 1 da, 2 mũi, 3 kính, 4–5 mắt, 6�
 | PC 0.15.0 → 0.15.2 | PR #2, nhánh `claude/project-thread-r8nke4` (base `ampo6r`) | 0.15.2 commit 1093c0b; gói zip đã giao; chờ huy thử + merge |
 | Bản dev 0.15.0 | PR #3, nhánh `claude/project-thread-fzn3gn` (base `r8nke4` ở 062e49d) | chờ merge, chưa thử Windows |
 | PC 0.16.0 (API ngoài) | PR #4, nhánh `claude/project-thread-jx4n06` (base `r8nke4` ở 062e49d) | chờ merge, chưa thử khoá thật |
+| PC 0.16.0 (Nguồn xử lý + màu cảnh ở Đơn giản) | PR #6, nhánh `claude/project-thread-9g3kiv` (base `r8nke4` ở 0.15.1, đã gộp PR #4) | gói 0.16.0 đã giao; chờ merge, chưa thử Windows/khoá thật |
+| Tài liệu bàn giao | PR #5, nhánh `claude/project-thread-81lvh2` → `main` | chỉ tài liệu |
 | Android 0.10.1 | main Creator-ID-360 (versionCode 15) | đã giao Full + Cập nhật, chưa thử máy thật |
 | Preset ảnh thẻ (file) | nhánh `claude/project-thread-tso5vb`, chưa PR | đã gộp vào PR #2 ở 0.15.2; nhánh này coi như cũ |
 
@@ -96,13 +98,17 @@ Tóm tắt từng PR:
 - **#4 (0.16.0)**: `net_anh/providers.py`, server `engine=<id>&consent=1&guard=0|1`, kiểm IDS ArcFace (< 0,70 thì xử lý
   bằng pipeline máy này), `docs/API_NGOAI.md`. Khoá chỉ đọc từ biến môi trường / `~/.net_anh/providers.json` trên máy chủ.
 
-**Thứ tự merge (bắt buộc):** #1 → main; đổi base #2 sang main rồi merge; đổi base #3 và #4 sang main, **merge main vào
-từng nhánh** (cả hai thiếu 0.15.1/0.15.2), giải xung đột (`net_anh/__init__.py` version, `tools/dong_goi_nguoi_dung.py`,
+- **#6 (0.16.0)**: `net_anh/sources.py`, `gui_sources.py`: ô Nguồn xử lý Trên máy này / Máy chủ GPU (ghép nối mã 6 số,
+  gửi `settings=<JSON>`) / API ngoài (khoá người dùng nhập, hỏi đồng ý mỗi lần, kiểm giữ mặt); Đơn giản > Ảnh cũ có Nâng
+  màu cảnh + Tô màu AI. **Đã chứa PR #4** nhưng **thiếu 0.15.2** (Đổi nền mới, 4 preset ảnh thẻ).
+
+**Thứ tự merge (bắt buộc):** #1 → main; đổi base #2 sang main rồi merge; đổi base #3 và #6 sang main (#4 đã nằm trong #6, đóng #4
+hoặc merge #4 trước #6), **merge main vào từng nhánh** (#3 thiếu 0.15.1/0.15.2, #6 thiếu 0.15.2), giải xung đột (`net_anh/__init__.py` version, `tools/dong_goi_nguoi_dung.py`,
 `gui.py`, README), chạy lại test rồi merge. Phiên bản sau cùng: 0.16.x. **Không tự merge**: chỉ merge khi huy bảo rõ.
 
 Thread khác đang chạy lúc viết (có thể đã đẩy thêm commit, xem `git log` các nhánh):
-- "Đưa tính năng còn thiếu vào sẵn": đưa màu cảnh ảnh cũ, DDColor, khử bóng da ra chế độ Đơn giản; ô chọn nguồn xử lý +
-  hộp đồng ý gửi ảnh ra ngoài (dựa trên PR #4).
+- "Đưa tính năng còn thiếu vào sẵn": đã ra PR #6 (0.16.0). Còn thiếu: Android chưa có ô nguồn/đồng ý; làm thư mục qua
+  máy chủ; small_face_sr, fade_style, max_faces chỉ có ở CLI.
 - "Audit chức năng ảnh hưởng kết quả": chứng minh từng thông số Chuyên sâu 0.15.1 thật sự đổi kết quả render (~200 lượt),
   sửa lỗi tìm được, mở PR.
 - "Tối ưu app cho mọi dòng card": vừa giao 0.15.2, chờ huy thử.
@@ -188,7 +194,7 @@ Mỗi lần cập nhật chỉ đưa 4 gói vào `/mnt/project-files/` (thư m�
   dựng; **chờ huy thử trên Windows**. Ảnh trước/sau: `/mnt/project-files/doi-nen/truoc-sau-0.15.2.png`.
 - **4 preset ảnh thẻ có sẵn**: xong ở 0.15.2 (Nam trẻ, Nữ trẻ, Nam lớn tuổi, Nữ lớn tuổi; bản nạp tay trùng thì dọn, đã sửa
   thì giữ thêm "(của bạn)"). Còn thiếu ảnh thẻ gốc nam trẻ, nam 60+, nữ 60+ của huy để tinh chỉnh.
-- **Đưa tính năng vào chế độ Đơn giản** (màu cảnh, DDColor, khử bóng, ô chọn nguồn API): thread khác đang làm.
+- **Đưa tính năng vào chế độ Đơn giản**: xong ở PR #6 (0.16.0), chưa thử Windows.
 - **Audit thông số Chuyên sâu**: thread khác đang làm.
 - **File đo GPU của huy**: chờ huy chạy Trợ giúp → Đo tốc độ card (`NetAnh.exe --do-gpu`), gửi `BeautyHDR-do-gpu-*.txt`
   để thay số ước lượng (SPEEDUP, ACT_BYTES_PER_PX) bằng số thật (`tools/nhap_so_do.py`).
@@ -217,7 +223,7 @@ Mỗi lần cập nhật chỉ đưa 4 gói vào `/mnt/project-files/` (thư m�
 
 1. **Hai bản "0.14.1"**: zip `net-anh-pc-0.14.1.zip` (sửa loang look.py) khác `main` 0.14.1 (GPU, launcher, Drive). Từ
    0.14.2 lấy **kho GitHub** làm gốc; không đóng gói từ các zip `net-anh-pc-*.zip` cũ.
-2. PR #3, #4 dựng trên 0.15.0 (062e49d), **thiếu 0.15.1/0.15.2**; phải merge nhánh mới vào trước khi merge/đóng gói.
+2. PR #3, #4 dựng trên 0.15.0 (062e49d), **thiếu 0.15.1/0.15.2**; PR #6 dựng trên 0.15.1, **thiếu 0.15.2**; phải merge nhánh mới vào trước khi merge/đóng gói.
 3. PowerShell: gọi script bằng mảng tham số truyền theo vị trí → `-CapNhat` rơi vào `-Flavor`. Luôn splat bảng băm
    `@{CapNhat=$true}`. Trong hàm PS mọi output không bắt đều thành giá trị trả về (dùng `| Out-Host`). Script inline của
    workflow không có BOM → so mẫu ASCII.
