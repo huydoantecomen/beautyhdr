@@ -221,6 +221,8 @@ def run(say: Callable[[str], None] = print, quick: bool = False, out_dir: Path |
     if not quick or not gpu:
         rep["pipeline"] = _pipeline(eng, device, say, pipeline_images if gpu else 2)
 
+    rep["schema"] = SCHEMA
+    rep["records"] = records(rep)
     out_dir = out_dir or _out_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     card = re.sub(r"[^A-Za-z0-9]+", "-", dev.name.replace("GPU ", "").split(" (")[0]).strip("-") or "CPU"
@@ -256,6 +258,51 @@ def _pipeline(eng, device: str, say, n: int) -> dict:
         say(f"Cả quy trình, {workers} luồng: {dt / n:.2f} s mỗi ảnh (ô {engines[0].last_tile} px)")
         for e in engines:
             e.vram_share = 1.0
+    return out
+
+
+SCHEMA = 1  # đổi khi đổi cấu trúc bản ghi; tools/nhap_so_do.py đọc được mọi bản cũ hơn
+
+
+def records(rep: dict) -> list[dict]:
+    """Số đo dạng bản ghi phẳng (một số một dòng) để gộp vào net_anh/du_lieu/so_do_gpu.json bằng tools/nhap_so_do.py.
+    Thêm loại số đo mới = thêm metric mới, không đổi cấu trúc. app_default: đúng cấu hình app dùng trên card này."""
+    base = {"family": rep.get("family"), "card": rep.get("device"), "kind": rep.get("kind"), "cc": rep.get("cc"),
+            "vram_gb": rep.get("vram_gb"), "app": rep.get("app"), "torch": rep.get("torch"), "cuda": rep.get("cuda"),
+            "driver": rep.get("driver"), "date": rep.get("time")}
+    cc = tuple(rep["cc"]) if rep.get("cc") else None
+    out: list[dict] = []
+
+    def add(model, dtype, metric, value, **kw):
+        if isinstance(value, (int, float)) and math.isfinite(value):
+            out.append(dict(base, model=model, dtype=dtype, metric=metric, value=value, **kw))
+
+    for r in rep.get("sr", []):
+        if "error" in r:
+            continue
+        m, dt = r["model"], r["dtype"]
+        cl_app = gpu_profile.channels_last(rep.get("kind", ""), cc, dt, m)
+        for k, v in r.items():
+            mt = re.fullmatch(r"s_(\d+)(_kenh_cuoi)?", k)
+            if mt:
+                side, cl = int(mt.group(1)), bool(mt.group(2))
+                add(m, dt, "s_per_mp", v / (side * side / 1e6), tile=side, channels_last=cl, app_default=cl == cl_app)
+            mb = re.fullmatch(r"bytes_per_px_(\d+)", k)
+            if mb:
+                add(m, dt, "bytes_per_px", v, tile=int(mb.group(1)))
+        if dt != "fp32" and "mean_err" in r:
+            add(m, dt, "probe_err", r["mean_err"], ok=bool(r.get("probe_ok")))
+    for k, v in rep.get("face", {}).items():
+        mt = re.fullmatch(r"gfpgan_(fp32|fp16|bf16)_s", k)
+        if mt:
+            add("gfpgan", mt.group(1), "s_per_face", v)
+        me = re.fullmatch(r"gfpgan_(fp16|bf16)_lech_muc_xam", k)
+        if me and isinstance(v, (int, float)):
+            add("gfpgan", me.group(1), "probe_err", v / 255)
+    for k, v in rep.get("pipeline", {}).items():
+        mw = re.fullmatch(r"workers_(\d+)_s_per_image", k)
+        if mw:
+            add("pipeline_compact_x2", "auto", "pipeline_s_per_image", v, workers=int(mw.group(1)))
     return out
 
 

@@ -181,6 +181,13 @@ có thì điện thoại tự xử lý trên máy. Mở **Beauty HDR - Máy ch�
   RestoreFormer chạy thử bf16 trên RTX 30 trở lên (fp16 bị loại: GFPGAN fp16 lệch 91 mức xám, đo trên CPU), ra NaN thì
   tự về fp32. Làm thư mục từ 3 ảnh trên NVIDIA: bật cuDNN tự chọn thuật toán (`NETANH_CUDNN_BENCHMARK=0` để tắt). Bảng
   **Khuyến nghị theo card…** có thêm bảng từng model (kiểu số, kênh cuối, cỡ ô, thời gian ước lượng) cho card của máy.
+- Dữ liệu card × model tách khỏi code, để sau này thêm model nặng hơn: `net_anh/du_lieu/model_profiles.json` khai mỗi
+  model một dòng (vai trò, kiến trúc, chạy được fp16/bf16 không, bộ nhớ mỗi điểm ảnh, tốc độ CPU, VRAM tối thiểu, cần bf16
+  thật không, ngưỡng chậm). Bảng khuyến nghị, cắt ô, ước lượng tốc độ và kiểm phần cứng (app ghi chú khi model chậm hoặc
+  thiếu VRAM trên card này) đều dựng từ file đó. File đo (`--do-gpu`) có thêm `schema` và danh sách bản ghi phẳng (một số
+  một dòng: dòng card, card, model, kiểu số, loại số đo, giá trị, cỡ ô, kênh cuối, bản app/PyTorch/driver);
+  `python tools/nhap_so_do.py <file.json>` gộp vào `net_anh/du_lieu/so_do_gpu.json`, và app dùng trung vị số đo thật
+  thay cho ước lượng (bảng ghi "(đo)"). `NETANH_DATA_DIR` trỏ tới thư mục khác để thử bảng mới không phải build lại.
 - Intel Arc / Iris Xe (gói xpu từ 0.14.1) giữ fp32, cắt ô theo bộ nhớ; AMD chưa có gói cài sẵn (ROCm hoặc DirectML tự cài
   từ mã nguồn), thử nghiệm.
 - Đo trên card thật: **Trợ giúp → Đo tốc độ card…** hoặc `NetAnh.exe --do-gpu` (`python app.py --do-gpu`, thêm `--nhanh`):

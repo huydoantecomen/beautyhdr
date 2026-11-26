@@ -899,7 +899,7 @@ class Enhancer:
             return gpu_profile.CPU_TILE
         dt = {torch.float16: "fp16", torch.bfloat16: "bf16"}.get(next(net.parameters()).dtype, "fp32")
         k = self.vram_share
-        return gpu_profile.auto_tile(model, self.dev.free_vram_gb() * k, self.dev.vram_gb * k, dt)
+        return gpu_profile.auto_tile(model, self.dev.free_vram_gb() * k, self.dev.vram_gb * k, dt, self.dev.family.key)
 
     def _tiled(self, net, x: torch.Tensor, scale: int, tile: int, pad: int, label: str = "Real-ESRGAN") -> np.ndarray:
         """Chạy chia ô, ghép vào ảnh uint8 trên RAM (không giữ tensor float cả ảnh ra: ảnh 12 MP phóng 4× là 192 MP,
@@ -998,6 +998,10 @@ class Enhancer:
         elif extra and tile:
             tile = min(tile, weights.MANIFEST[extra].tile or tile)
         self.last_tile = tile
+        mkey = s.sr_model if s.sr_model in gpu_profile.MODEL_DB else "rrdb"
+        lvl, why = gpu_profile.fits(self.dev.family, mkey, self.dev.vram_gb)
+        if lvl != "ok" and self.dev.kind != "cpu":  # yêu cầu phần cứng khai trong du_lieu/model_profiles.json
+            rep.notes.append(f"{label if extra else gpu_profile.MODEL_DB[mkey].label} trên {self.dev.name}: {why}")
         self._fp32_fallback = self._nonfinite = False
         while True:
             try:

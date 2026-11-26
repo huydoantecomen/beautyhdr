@@ -13,6 +13,7 @@ from __future__ import annotations
 import math
 import os
 import re
+from pathlib import Path
 from dataclasses import dataclass
 
 GB = 1024**3
@@ -262,14 +263,58 @@ def probe_dtype(net, device, dtype, size: int = 96, fn=None) -> ProbeResult:
 
 # ---------------------------------------------------------------- tăng tốc thêm theo card × model
 
-# Kiến trúc từng model: tích chập (conv) hay chú ý (attention). Tensor Core (RTX 20 trở lên) chạy tích chập fp16 / bf16
-# nhanh nhất khi dữ liệu xếp theo kênh cuối (channels_last, NHWC); để mặc định (NCHW) thì cuDNN phải đảo lại mỗi lớp.
-# GFPGAN là "stylegan": có .view() trên đặc trưng nên không chạy được kênh cuối (đã thử, lỗi view size).
-MODEL_ARCH = {"compact": "conv", "rrdb": "conv", "plksr": "conv", "dat2": "attention", "gfpgan": "stylegan",
-              "restoreformer": "attention", "restoreformer_pp": "attention"}
-MODEL_OF_KEY = {"compact": "compact", "esrgan_x4": "rrdb", "esrgan_x2": "rrdb", "plksr_web": "plksr",
-                "dat2_web": "dat2"}
+# Khai báo từng model nằm ở du_lieu/model_profiles.json (thêm model mới = thêm một mục ở đó); số đo thật trên card ở
+# du_lieu/so_do_gpu.json (gộp file đo bằng tools/nhap_so_do.py). Mọi bảng dưới đây dựng từ hai file đó.
+# Tensor Core (RTX 20 trở lên) chạy tích chập fp16 / bf16 nhanh nhất khi dữ liệu xếp theo kênh cuối (channels_last,
+# NHWC). GFPGAN là "stylegan": có .view() trên đặc trưng nên không chạy được kênh cuối (đã thử, lỗi view size).
+DATA_DIR = Path(__file__).with_name("du_lieu")
 
+
+@dataclass(frozen=True)
+class ModelProfile:
+    key: str
+    label: str
+    levels: str  # dùng ở mức / chế độ nào (hiện cho người dùng)
+    role: str  # "sr" model nền (đơn vị megapixel ảnh vào) | "face" model mặt (đơn vị một mặt 512 px)
+    arch: str  # "conv" | "attention" | "stylegan" | "diffusion"
+    weights: tuple[str, ...]  # mã model trong weights.MANIFEST
+    fp16: bool
+    bf16: bool
+    act_bytes_per_px: float = 30_000
+    model_gb: float = 0.1
+    cpu_s: float = 0.0  # giây mỗi đơn vị trên CPU 4 luồng; 0 = chưa đo
+    min_vram_gb: float = 0.0
+    min_precision: str = ""  # "bf16": chỉ chấp nhận được về tốc độ trên card có bf16 thật
+    slow_s: float = 30.0
+    note: str = ""
+
+
+def _read_json(name: str) -> dict:
+    """Đọc file dữ liệu; NETANH_DATA_DIR (thư mục) ghi đè được để thử bảng mới không phải build lại."""
+    import json
+
+    for d in (os.environ.get("NETANH_DATA_DIR"), DATA_DIR):
+        if d and (Path(d) / name).is_file():
+            return json.loads((Path(d) / name).read_text(encoding="utf-8"))
+    return {}
+
+
+def load_models() -> dict[str, ModelProfile]:
+    fields = set(ModelProfile.__dataclass_fields__)
+    out = {}
+    for m in _read_json("model_profiles.json").get("models", []):
+        kw = {k: v for k, v in m.items() if k in fields}
+        kw["weights"] = tuple(kw.get("weights", ()))
+        out[m["key"]] = ModelProfile(**kw)
+    return out
+
+
+MODEL_DB: dict[str, ModelProfile] = load_models()
+DTYPE_GAIN: dict[str, dict[str, float]] = {k: v for k, v in _read_json("model_profiles.json").get("dtype_gain", {}).items()
+                                           if not k.startswith("_")}
+# bảng phụ dựng từ MODEL_DB (giữ tên cũ cho code khác dùng)
+MODEL_ARCH = {k: m.arch for k, m in MODEL_DB.items()}
+MODEL_OF_KEY = {w: k for k, m in MODEL_DB.items() for w in m.weights} | {k: k for k in MODEL_DB}
 
 def _env_flag(name: str) -> bool | None:
     v = os.environ.get(name, "").strip().lower()
@@ -320,32 +365,83 @@ def to_contiguous(net) -> None:
             m.to(memory_format=torch.contiguous_format)
 
 
-# Tốc độ dự kiến: thời gian mỗi megapixel ảnh VÀO trên CPU 4 luồng (đo 2026-11-26, ô 192 px, PyTorch 2.x) chia cho
-# speedup của dòng card và hệ số kiểu số. CHƯA ĐO TRÊN GPU THẬT: số ước lượng, sẽ thay bằng file đo của huy.
-CPU_S_PER_MP = {"compact": 4.8, "plksr": 34.5, "rrdb": 83.0, "dat2": 286.0}
-CPU_S_PER_FACE = {"gfpgan": 1.15}
-# nhanh thêm bao nhiêu lần so với fp32 trên cùng card có Tensor Core (tích chập fp16 + kênh cuối ≈ 2×, chú ý bf16 ≈ 1,5×)
-DTYPE_GAIN = {("conv", "fp16"): 2.0, ("conv", "bf16"): 1.8, ("attention", "bf16"): 1.5, ("attention", "fp16"): 1.6,
-              ("stylegan", "bf16"): 1.5}
+# ---------------------------------------------------------------- số đo thật và ước lượng
+
+def load_measurements() -> list[dict]:
+    return [r for r in _read_json("so_do_gpu.json").get("records", []) if isinstance(r, dict)]
+
+
+MEASURED: list[dict] = load_measurements()
+
+
+def measured(family: str, model: str, dtype: str, metric: str, records: list[dict] | None = None) -> float | None:
+    """Trung vị các số đo thật cùng dòng card, model, kiểu số, loại số đo (None nếu chưa có ai đo)."""
+    vals = sorted(float(r["value"]) for r in (MEASURED if records is None else records)
+                  if r.get("family") == family and r.get("model") == model and r.get("dtype") == dtype
+                  and r.get("metric") == metric and isinstance(r.get("value"), (int, float))
+                  and r.get("app_default", True))  # chỉ số đo đúng cấu hình app dùng (vd. kênh cuối bật/tắt)
+    if not vals:
+        return None
+    n = len(vals)
+    return vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
+
+
+def _gpu_family(fam: Family) -> bool:
+    return fam.key not in ("cpu", "kepler")
 
 
 def best_dtype(fam: Family, model: str) -> str:
-    """Kiểu số dự kiến app sẽ chọn cho model trên dòng card (khi chạy thử đạt)."""
-    if model in ("dat2",):  # DAT-2 fp16 ra NaN: chỉ bf16 thật (cc ≥ 8)
-        return "bf16" if "bf16" in fam.precisions else "fp32"
-    if model in CPU_S_PER_FACE or model.startswith("restoreformer"):  # model mặt
+    """Kiểu số dự kiến app sẽ chọn cho model trên dòng card (khi chạy thử đạt), theo khai báo fp16 / bf16 của model."""
+    m = MODEL_DB.get(model)
+    if m is None or not _gpu_family(fam):
+        return "fp32"
+    if m.role == "face":
         return face_candidates(fam, model)[0]
-    return fam.precisions[0]
+    for p in fam.precisions:
+        if p == "fp32" or (p == "fp16" and m.fp16) or (p == "bf16" and m.bf16):
+            return p
+    return "fp32"
 
 
 def est_seconds(fam: Family, model: str, mp: float = 1.0) -> float | None:
-    """Thời gian dự kiến cho `mp` megapixel ảnh vào (model nền) hoặc một mặt (model mặt). None khi chưa có số đo CPU."""
-    base = CPU_S_PER_MP.get(model) if model in CPU_S_PER_MP else CPU_S_PER_FACE.get(model)
-    if not base:
-        return None
-    mult = mp if model in CPU_S_PER_MP else 1.0
-    gain = DTYPE_GAIN.get((MODEL_ARCH.get(model, "conv"), best_dtype(fam, model)), 1.0)
-    return base * mult / max(fam.speedup, 1e-6) / gain
+    """Thời gian cho `mp` megapixel ảnh vào (model nền) hoặc một mặt (model mặt): số đo thật nếu đã có (so_do_gpu.json),
+    không thì ước lượng = giây trên CPU / speedup dòng card / hệ số kiểu số. None khi model chưa có số đo CPU."""
+    return est(fam, model, mp)[0]
+
+
+def est(fam: Family, model: str, mp: float = 1.0) -> tuple[float | None, bool]:
+    """(thời gian, True nếu là số đo thật)."""
+    m = MODEL_DB.get(model)
+    if m is None:
+        return None, False
+    mult = mp if m.role == "sr" else 1.0
+    dt = best_dtype(fam, model)
+    real = measured(fam.key, model, dt, "s_per_mp" if m.role == "sr" else "s_per_face")
+    if real is not None:
+        return real * mult, True
+    if not m.cpu_s:
+        return None, False
+    gain = DTYPE_GAIN.get(m.arch, {}).get(dt, 1.0) if dt != "fp32" else 1.0
+    return m.cpu_s * mult / max(fam.speedup, 1e-6) / gain, False
+
+
+def fits(fam: Family, model: str, vram_gb: float = 0.0) -> tuple[str, str]:
+    """Kiểm phần cứng cho model: ("ok" | "chậm" | "không", lý do). Dùng khi thêm model đòi hỏi phần cứng cao hơn: khai
+    min_vram_gb, min_precision, slow_s trong model_profiles.json là app tự cảnh báo / chặn, không phải sửa code."""
+    m = MODEL_DB.get(model)
+    if m is None:
+        return "không", "model chưa khai báo"
+    gpu = _gpu_family(fam)
+    if gpu and vram_gb and m.min_vram_gb and vram_gb < m.min_vram_gb:
+        return "không", f"cần ít nhất {m.min_vram_gb:g} GB VRAM (card có {vram_gb:g} GB)"
+    if m.min_precision and best_dtype(fam, model) != m.min_precision:
+        why = f"card không có {m.min_precision} thật, chạy fp32" if gpu else "chạy CPU"
+        t = est_seconds(fam, model)
+        return "chậm", why + (f" (khoảng {_fmt_s(t)} mỗi {'MP' if m.role == 'sr' else 'mặt'})" if t else "")
+    t = est_seconds(fam, model)
+    if t is not None and t > m.slow_s:
+        return "chậm", f"khoảng {_fmt_s(t)} mỗi {'megapixel' if m.role == 'sr' else 'mặt'}"
+    return "ok", ""
 
 
 # ---------------------------------------------------------------- cỡ ô theo bộ nhớ
@@ -353,21 +449,25 @@ def est_seconds(fam: Family, model: str, mp: float = 1.0) -> float | None:
 # Bộ nhớ trung gian mỗi điểm ảnh ô VÀO ở fp32 (byte): đỉnh RAM khi chạy một ô 192 và 320 px trên CPU (2026-11-26:
 # compact 1 000, x4plus 13 100, RealPLKSR 1 500, DAT-2 17 000; khớp số cũ DAT-2 ô 256 px ≈ 1,1 GB) nhân 2 cho bộ đệm
 # của cuDNN và bộ cấp phát GPU. fp16 / bf16: một nửa. Thiếu bộ nhớ thật thì app vẫn tự chia đôi ô (như trước).
-ACT_BYTES_PER_PX = {"compact": 2_500, "rrdb": 26_000, "plksr": 4_000, "dat2": 34_000}
-MODEL_GB = {"compact": 0.01, "rrdb": 0.07, "plksr": 0.03, "dat2": 0.15}
+ACT_BYTES_PER_PX = {k: m.act_bytes_per_px for k, m in MODEL_DB.items() if m.role == "sr"}  # từ model_profiles.json
+MODEL_GB = {k: m.model_gb for k, m in MODEL_DB.items()}
 RESERVE_GB = 1.2  # để lại cho model mặt, ParseNet, tìm mặt, Windows và app khác dùng GPU
 TILE_MIN, TILE_MAX = 128, 1536
 BAND_BYTES = 768 * 1024**2  # trần RAM cho dải cộng dồn khi ghép ô (Enhancer._tiled)
 CPU_TILE = 400  # CPU: ô vừa phải (RAM, thanh tiến độ), như các bản trước
 
 
-def auto_tile(model: str, free_gb: float, total_gb: float, dtype: str = "fp32") -> int:
+def auto_tile(model: str, free_gb: float, total_gb: float, dtype: str = "fp32", family: str = "") -> int:
     """Cạnh ô lớn nhất (px ảnh vào) vừa bộ nhớ GPU còn trống. free_gb = 0: không đọc được bộ nhớ, dùng 400 như cũ."""
     if free_gb <= 0 and total_gb <= 0:
         return CPU_TILE
     budget = min(free_gb if free_gb > 0 else total_gb * 0.7, total_gb * 0.85 if total_gb > 0 else free_gb)
     budget -= RESERVE_GB + MODEL_GB.get(model, 0.1)
     per_px = ACT_BYTES_PER_PX.get(model, 30_000) * (0.5 if dtype in ("fp16", "bf16") else 1.0)
+    if family:  # số đo thật trên dòng card này (đỉnh bộ nhớ GPU mỗi điểm ảnh ô vào), cộng 30 % dư
+        real = measured(family, model, dtype, "bytes_per_px")
+        if real:
+            per_px = real * 1.3
     if budget <= 0:
         return TILE_MIN
     side = int(math.sqrt(budget * GB / per_px))
@@ -427,9 +527,15 @@ def recommendation(fam: Family, vram_gb: float = 0.0) -> dict[str, str]:
             "Nên dùng": level, "Hàng loạt": batch, "Mức hỗ trợ": fam.support, "Ghi chú": fam.note}
 
 
-MODELS = (("compact", "Real-ESRGAN compact (mức 1–4, mặc định)"), ("plksr", "RealPLKSR (mức 5)"),
-          ("rrdb", "Real-ESRGAN x4plus"), ("dat2", "DAT-2 (mức 6 Cao nhất)"), ("gfpgan", "GFPGAN (mỗi khuôn mặt)"))
-MODEL_COLS = ("Model", "Kiểu số", "Kênh cuối", "Cắt ô", "Dự kiến", "Ghi chú")
+def table_models() -> list[str]:
+    """Model hiện trong bảng từng model: model nền rồi model mặt, theo thứ tự trong model_profiles.json; bỏ model chưa
+    có số đo CPU lẫn số đo GPU (chưa ước lượng được)."""
+    ks = [k for k, m in MODEL_DB.items() if m.cpu_s or any(r.get("model") == k for r in MEASURED)]
+    return sorted(ks, key=lambda k: MODEL_DB[k].role != "sr")
+
+
+MODELS = tuple((k, f"{MODEL_DB[k].label} ({MODEL_DB[k].levels})") for k in table_models())
+MODEL_COLS = ("Model", "Kiểu số", "Kênh cuối", "Cắt ô", "Dự kiến", "Phần cứng", "Ghi chú")
 
 
 def _fmt_s(t: float | None) -> str:
@@ -441,40 +547,32 @@ def _fmt_s(t: float | None) -> str:
 
 
 def model_rows(fam: Family, vram_gb: float = 0.0, cc: tuple[int, int] | None = None) -> list[dict[str, str]]:
-    """Bảng card × model: kiểu số app sẽ chọn (khi chạy thử đạt), có xếp kênh cuối không, cỡ ô theo VRAM và thời gian
-    dự kiến cho ảnh 1 MP vào (≈ 1200×800, ra 4 800×3 200) hoặc một mặt. Thời gian là ƯỚC LƯỢNG: số đo CPU / speedup dòng
-    card / hệ số kiểu số; sẽ thay bằng số đo thật (Trợ giúp → Đo tốc độ card)."""
-    gpu = fam.key not in ("cpu", "kepler")
+    """Bảng card × model: kiểu số app sẽ chọn (khi chạy thử đạt), có xếp kênh cuối không, cỡ ô theo VRAM, thời gian cho
+    ảnh 1 MP vào (≈ 1200×800, ra 4 800×3 200) hoặc một mặt — số đo thật nếu có, không thì ước lượng — và kiểm phần cứng."""
+    gpu = _gpu_family(fam)
     kind = "cuda" if fam.key in ("rtx50", "rtx40", "rtx30", "rtx20", "gtx16", "volta", "gtx10", "maxwell", "nvidia") else "other"
     cc = cc or {"rtx50": (12, 0), "rtx40": (8, 9), "rtx30": (8, 6), "rtx20": (7, 5), "gtx16": (7, 5), "volta": (7, 0),
                 "gtx10": (6, 1), "maxwell": (5, 2)}.get(fam.key)
     v = vram_gb or (min(fam.vram_common) if fam.vram_common else 0.0)
     rows = []
-    for m, label in MODELS:
-        dt = best_dtype(fam, m) if gpu else "fp32"
-        face = m == "gfpgan"
+    for k, label in MODELS:
+        m = MODEL_DB[k]
+        dt = best_dtype(fam, k)
+        face = m.role == "face"
         if face:
             tile = "512 px cố định (một mặt)"
         elif not gpu:
             tile = f"{CPU_TILE} px"
         elif v:
-            tile = f"{auto_tile(m, v * 0.9, v, dt)} px ({v:g} GB)"
+            tile = f"{auto_tile(k, v * 0.9, v, dt, fam.key)} px ({v:g} GB)"
         else:
             tile = "theo bộ nhớ, không đọc được thì 400 px"
-        note = ""
-        if m == "dat2":
-            note = "fp16 ra NaN nên chỉ bf16 (RTX 30 trở lên) hoặc fp32" if dt == "fp32" and gpu else "Model chú ý: không dùng kênh cuối"
-            if fam.key in ("gtx16", "gtx10", "maxwell", "intel_igpu", "amd_dml", "cpu", "kepler"):
-                note = "Rất chậm trên dòng này: nên dùng mức 1–5"
-        elif face:
-            note = ("bf16 (lệch < 1 mức xám); fp16 bị loại vì lệch màu mặt 91 mức xám" if dt == "bf16" else
-                    "fp32: fp16 làm lệch màu mặt (91 mức xám), dòng này không có bf16 thật") if gpu else ""
-        elif m == "compact":
-            note = "Nhẹ nhất, mặc định"
-        cl = channels_last(kind, cc, dt, m)
-        rows.append({"Model": label, "Kiểu số": dt, "Kênh cuối": "có" if cl else "không", "Cắt ô": tile,
-                     "Dự kiến": _fmt_s(est_seconds(fam, m, 1.0)) + (" / mặt" if face else " / 1 MP vào"),
-                     "Ghi chú": note})
+        t, real = est(fam, k, 1.0)
+        level, why = fits(fam, k, v)
+        rows.append({"Model": label, "Kiểu số": dt, "Kênh cuối": "có" if channels_last(kind, cc, dt, k) else "không",
+                     "Cắt ô": tile,
+                     "Dự kiến": _fmt_s(t) + (" / mặt" if face else " / 1 MP vào") + (" (đo)" if real else " (ước lượng)"),
+                     "Phần cứng": level + (f": {why}" if why else ""), "Ghi chú": m.note})
     return rows
 
 
@@ -486,6 +584,7 @@ def table() -> list[dict[str, str]]:
     return [recommendation(FAMILIES[k]) for k in TABLE_ORDER]
 
 
-__all__ = ["model_rows", "MODELS", "MODEL_COLS", "to_channels_last", "to_contiguous", "channels_last", "cudnn_benchmark", "face_candidates", "face_forward", "best_dtype", "est_seconds",
+__all__ = ["ModelProfile", "MODEL_DB", "load_models", "load_measurements", "measured", "est", "fits", "table_models",
+           "model_rows", "MODELS", "MODEL_COLS", "to_channels_last", "to_contiguous", "channels_last", "cudnn_benchmark", "face_candidates", "face_forward", "best_dtype", "est_seconds",
            "MODEL_ARCH", "Family", "FAMILIES", "nvidia_family", "family_of", "arch_supported", "candidates", "probe_image",
            "probe_dtype", "compare", "ProbeResult", "auto_tile", "vram_class", "batch_workers", "recommendation", "table"]

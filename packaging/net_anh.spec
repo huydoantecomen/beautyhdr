@@ -48,7 +48,8 @@ a = Analysis(
     pathex=[str(ROOT)],
     binaries=TV_BINARIES,
     datas=collect_data_files("facexlib", excludes=["**/*.pth"]) + [(str(ROOT / "net_anh" / "assets" / "icon.png"), "net_anh/assets"),
-           (str(ROOT / "net_anh" / "drive_models.json"), "net_anh")],
+           (str(ROOT / "net_anh" / "drive_models.json"), "net_anh"),
+           (str(ROOT / "net_anh" / "du_lieu"), "net_anh/du_lieu")],
     hiddenimports=collect_submodules("net_anh") + collect_submodules("spandrel"),  # spandrel: DAT-2, RealPLKSR
     excludes=EXCLUDES,
     noarchive=False,

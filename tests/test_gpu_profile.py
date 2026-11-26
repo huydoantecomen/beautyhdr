@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -639,3 +640,103 @@ def test_estimates_follow_card_order():
     for m in ("compact", "rrdb", "dat2", "gfpgan"):
         ts = [gp.est_seconds(f[k], m) for k in ("rtx50", "rtx40", "rtx30", "rtx20", "gtx16", "gtx10", "cpu")]
         assert ts == sorted(ts), m
+
+
+# ---------------------------------------------------------------- dữ liệu mở rộng: khai báo model, kho số đo
+
+def test_model_db_covers_every_model_the_app_runs():
+    from net_anh import weights
+
+    for k in ("compact", "plksr", "rrdb", "dat2", "gfpgan", "restoreformer_pp"):
+        assert k in gp.MODEL_DB, k
+    for m in gp.MODEL_DB.values():
+        assert m.role in ("sr", "face") and m.arch in ("conv", "attention", "stylegan", "diffusion")
+        for w in m.weights:
+            assert w in weights.MANIFEST, (m.key, w)
+    assert gp.MODEL_OF_KEY["esrgan_x4"] == "rrdb" and gp.MODEL_OF_KEY["dat2_web"] == "dat2"
+    assert gp.ACT_BYTES_PER_PX["dat2"] == 34_000 and "gfpgan" not in gp.ACT_BYTES_PER_PX
+
+
+def _write_data(tmp_path, models: list[dict], records: list[dict]):
+    import json
+
+    base = json.loads((gp.DATA_DIR / "model_profiles.json").read_text(encoding="utf-8"))
+    base["models"] += models
+    (tmp_path / "model_profiles.json").write_text(json.dumps(base), encoding="utf-8")
+    (tmp_path / "so_do_gpu.json").write_text(json.dumps({"schema": 1, "records": records}), encoding="utf-8")
+
+
+def test_new_heavy_model_needs_only_a_data_row(tmp_path, monkeypatch):
+    """Thêm một model nặng (giả định, kiểu diffusion cần 12 GB, chỉ hợp lý với bf16): chỉ thêm dòng dữ liệu là bảng,
+    cắt ô, ước lượng và kiểm phần cứng đều có."""
+    import importlib
+
+    heavy = {"key": "sieu_net", "label": "Siêu nét (thử)", "levels": "mức 7", "role": "sr", "arch": "diffusion",
+             "weights": [], "fp16": False, "bf16": True, "act_bytes_per_px": 90000, "model_gb": 5.0, "cpu_s": 3000,
+             "min_vram_gb": 12, "min_precision": "bf16", "slow_s": 60}
+    _write_data(tmp_path, [heavy], [])
+    monkeypatch.setenv("NETANH_DATA_DIR", str(tmp_path))
+    g = importlib.reload(gp)
+    try:
+        assert "sieu_net" in g.MODEL_DB and any(k == "sieu_net" for k, _ in g.MODELS)
+        assert g.fits(g.FAMILIES["rtx40"], "sieu_net", 8)[0] == "không"  # thiếu VRAM
+        assert g.fits(g.FAMILIES["rtx40"], "sieu_net", 24)[0] == "ok"
+        assert g.fits(g.FAMILIES["rtx20"], "sieu_net", 24)[0] == "chậm"  # không có bf16 thật
+        assert g.best_dtype(g.FAMILIES["rtx30"], "sieu_net") == "bf16"
+        assert g.auto_tile("sieu_net", 20, 24, "bf16") >= g.TILE_MIN
+        row = next(r for r in g.model_rows(g.FAMILIES["rtx40"], 24) if r["Model"].startswith("Siêu nét"))
+        assert row["Phần cứng"] == "ok" and "(ước lượng)" in row["Dự kiến"]
+    finally:
+        monkeypatch.delenv("NETANH_DATA_DIR")
+        importlib.reload(gp)
+
+
+def test_measured_numbers_replace_estimates(tmp_path, monkeypatch):
+    import importlib
+
+    recs = [{"family": "gtx16", "card": f"GTX 1660 Ti #{i}", "model": "compact", "dtype": "fp32", "metric": "s_per_mp",
+             "value": v} for i, v in enumerate((0.9, 1.1, 1.0))]
+    recs.append({"family": "gtx16", "model": "compact", "dtype": "fp32", "metric": "s_per_mp", "value": 50.0,
+                 "app_default": False})  # cấu hình app không dùng: bỏ qua
+    recs.append({"family": "gtx16", "model": "dat2", "dtype": "fp32", "metric": "bytes_per_px", "value": 60000})
+    _write_data(tmp_path, [], recs)
+    monkeypatch.setenv("NETANH_DATA_DIR", str(tmp_path))
+    g = importlib.reload(gp)
+    try:
+        assert g.measured("gtx16", "compact", "fp32", "s_per_mp") == 1.0
+        t, real = g.est(g.FAMILIES["gtx16"], "compact", 2.0)
+        assert real and t == 2.0
+        assert not g.est(g.FAMILIES["rtx30"], "compact")[1]
+        assert g.auto_tile("dat2", 5, 6, "fp32", "gtx16") < g.auto_tile("dat2", 5, 6, "fp32")  # số đo thật lớn hơn
+        row = g.model_rows(g.FAMILIES["gtx16"], 6)[0]
+        assert row["Dự kiến"] == "1.0 s / 1 MP vào (đo)"
+    finally:
+        monkeypatch.delenv("NETANH_DATA_DIR")
+        importlib.reload(gp)
+
+
+def test_bench_records_and_import_tool(tmp_path):
+    import importlib.util
+
+    from net_anh import gpu_bench
+
+    rep = {"family": "rtx30", "device": "GPU 0: RTX 3060", "kind": "cuda", "cc": [8, 6], "vram_gb": 12, "app": "0.15.0",
+           "time": "2026-11-27 09:00",
+           "sr": [{"model": "compact", "dtype": "fp16", "s_256": 0.01, "s_512": 0.03, "s_512_kenh_cuoi": 0.02,
+                   "bytes_per_px_512": 1300, "probe_ok": True, "mean_err": 0.0001},
+                  {"model": "dat2", "dtype": "fp16", "error": "NaN"}],
+           "face": {"gfpgan_fp32_s": 0.05, "gfpgan_bf16_s": 0.03, "gfpgan_fp16_lech_muc_xam": 91.0},
+           "pipeline": {"workers_1_s_per_image": 0.8, "workers_2_s_per_image": 0.5}}
+    rs = gpu_bench.records(rep)
+    by = {(r["model"], r["dtype"], r["metric"], r.get("tile"), r.get("channels_last")): r for r in rs}
+    assert by[("compact", "fp16", "s_per_mp", 512, True)]["app_default"]  # RTX 30 fp16: app bật kênh cuối
+    assert not by[("compact", "fp16", "s_per_mp", 512, False)]["app_default"]
+    assert abs(by[("compact", "fp16", "s_per_mp", 512, True)]["value"] - 0.02 / 0.262144) < 1e-9
+    assert ("gfpgan", "bf16", "s_per_face", None, None) in by and not any(r["model"] == "dat2" for r in rs)
+    spec = importlib.util.spec_from_file_location("nhap_so_do", Path(__file__).resolve().parents[1] / "tools" / "nhap_so_do.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    store = {"schema": 1, "records": []}
+    assert tool.merge(store, tool.records_of(rep)) == len(rs)
+    assert tool.merge(store, tool.records_of(rep)) == 0  # gộp lại cùng file: không trùng
+    assert "rtx30" in tool.summary(store)

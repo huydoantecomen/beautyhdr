@@ -1,0 +1,37 @@
+{
+ "schema": 1,
+ "_huong_dan": "Mỗi model một dòng. Thêm model mới: thêm một mục vào 'models' (không cần sửa code bảng khuyến nghị, cắt ô, ước lượng tốc độ, kiểm phần cứng). role: sr (model nền, phóng ảnh) | face (model mặt, ảnh 512 px). arch: conv (tích chập) | attention (chú ý / transformer) | stylegan | diffusion. fp16 / bf16: model chạy được kiểu số đó không (app vẫn chạy thử trên từng card). act_bytes_per_px: bộ nhớ trung gian mỗi điểm ảnh ô vào ở fp32 (byte, đo CPU × 2). cpu_s: giây mỗi megapixel ảnh vào (sr) hoặc mỗi mặt (face) trên CPU 4 luồng. min_vram_gb: dưới mức này không chạy trên GPU (dùng CPU hoặc không cho chọn). min_precision: 'bf16' nếu model chỉ chấp nhận được về tốc độ khi có bf16 thật. slow_s: quá thời gian này mỗi đơn vị thì cảnh báo chậm.",
+ "models": [
+  {"key": "compact", "label": "Real-ESRGAN compact", "levels": "mức 1–4, mặc định", "role": "sr", "arch": "conv",
+   "weights": ["esrgan_compact", "esrgan_compact_wdn"], "fp16": true, "bf16": true,
+   "act_bytes_per_px": 2500, "model_gb": 0.01, "cpu_s": 4.8, "min_vram_gb": 1, "slow_s": 30,
+   "note": "Nhẹ nhất, mặc định"},
+  {"key": "plksr", "label": "RealPLKSR", "levels": "mức 5", "role": "sr", "arch": "conv",
+   "weights": ["plksr_web"], "fp16": true, "bf16": true,
+   "act_bytes_per_px": 4000, "model_gb": 0.03, "cpu_s": 34.5, "min_vram_gb": 2, "slow_s": 30, "note": ""},
+  {"key": "rrdb", "label": "Real-ESRGAN x4plus / x2plus", "levels": "phóng to thường", "role": "sr", "arch": "conv",
+   "weights": ["esrgan_x4", "esrgan_x2"], "fp16": true, "bf16": true,
+   "act_bytes_per_px": 26000, "model_gb": 0.07, "cpu_s": 83.0, "min_vram_gb": 2, "slow_s": 30, "note": ""},
+  {"key": "dat2", "label": "DAT-2", "levels": "mức 6 Cao nhất", "role": "sr", "arch": "attention",
+   "weights": ["dat2_web"], "fp16": false, "bf16": true,
+   "act_bytes_per_px": 34000, "model_gb": 0.15, "cpu_s": 286.0, "min_vram_gb": 4, "min_precision": "bf16", "slow_s": 30,
+   "note": "fp16 ra NaN nên chỉ bf16 (RTX 30 trở lên) hoặc fp32"},
+  {"key": "gfpgan", "label": "GFPGAN", "levels": "mỗi khuôn mặt", "role": "face", "arch": "stylegan",
+   "weights": ["gfpgan"], "fp16": false, "bf16": true,
+   "model_gb": 0.35, "cpu_s": 1.15, "min_vram_gb": 1, "slow_s": 3,
+   "note": "fp16 làm lệch màu mặt 91 mức xám (đo CPU) nên bị loại; bf16 lệch < 1 mức; không chạy được kênh cuối"},
+  {"key": "restoreformer_pp", "label": "RestoreFormer++", "levels": "model mặt giữ đúng người", "role": "face",
+   "arch": "attention", "weights": ["restoreformer_pp"], "fp16": false, "bf16": true,
+   "model_gb": 0.3, "cpu_s": 0, "min_vram_gb": 1, "slow_s": 3, "note": "Chưa đo tốc độ"},
+  {"key": "restoreformer", "label": "RestoreFormer", "levels": "model mặt", "role": "face",
+   "arch": "attention", "weights": ["restoreformer"], "fp16": false, "bf16": true,
+   "model_gb": 0.3, "cpu_s": 0, "min_vram_gb": 1, "slow_s": 3, "note": "Chưa đo tốc độ"}
+ ],
+ "dtype_gain": {
+  "_huong_dan": "Nhanh thêm bao nhiêu lần so với fp32 trên cùng card có Tensor Core, theo kiến trúc. Chỉ dùng khi chưa có số đo thật.",
+  "conv": {"fp16": 2.0, "bf16": 1.8},
+  "attention": {"fp16": 1.6, "bf16": 1.5},
+  "stylegan": {"fp16": 1.6, "bf16": 1.5},
+  "diffusion": {"fp16": 2.0, "bf16": 1.9}
+ }
+}

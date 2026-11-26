@@ -490,7 +490,7 @@ class CardsDialog(QDialog):
                 it = QTableWidgetItem(row[col])
                 it.setToolTip(row[col])
                 mt.setItem(r, c, it)
-        for c, w in enumerate((260, 70, 80, 200, 130, 420)):
+        for c, w in enumerate((260, 70, 80, 170, 170, 260, 360)):
             mt.setColumnWidth(c, w)
         mt.setMaximumHeight(200)
         self.model_table = mt
