@@ -27,6 +27,18 @@ jobs:
           $v = Get-Content -LiteralPath (Join-Path $old "ma-nguon\net_anh\__init__.py") -Raw
           if ($v -notmatch '0\.15') { throw "chưa ghi đè: $v" }
           if (-not (Test-Path -LiteralPath (Join-Path $old "ma-nguon\_build"))) { throw "mất _build" }
+          # đường gọi build_windows.ps1 thật (không build): -CapNhat phải vào đúng tham số, không rơi vào -Flavor
+          $env:NETANH_KIEM_THAM_SO = "1"
+          $o1 = powershell -NoProfile -ExecutionPolicy Bypass -File packaging\cap_nhat.ps1 -Target $old -NguonMoi "$env:GITHUB_WORKSPACE" 2>&1 | Out-String
+          Write-Host $o1
+          if ($o1 -notmatch "THAMSO CapNhat=True Flavor=cpu FlavorGiven=False") { throw "CAP_NHAT.bat: sai tham số: $o1" }
+          $o2 = powershell -NoProfile -ExecutionPolicy Bypass -File packaging\cap_nhat.ps1 -Target $old -NguonMoi "$env:GITHUB_WORKSPACE" -Flavor cuda 2>&1 | Out-String
+          Write-Host $o2
+          if ($o2 -notmatch "THAMSO CapNhat=True Flavor=cuda FlavorGiven=True") { throw "CHUYEN_SANG_GPU.bat: sai tham số: $o2" }
+          # đúng như file .bat gọi (STA, -File, %* rỗng)
+          $o3 = powershell -NoProfile -ExecutionPolicy Bypass -STA -File packaging\cap_nhat.ps1 -Flavor cuda -Target $old -NguonMoi "$env:GITHUB_WORKSPACE" 2>&1 | Out-String
+          if ($o3 -notmatch "Flavor=cuda FlavorGiven=True") { throw "gọi như .bat: sai tham số: $o3" }
+          Remove-Item Env:NETANH_KIEM_THAM_SO
           powershell -NoProfile -ExecutionPolicy Bypass -File packaging\cap_nhat.ps1 -Target (Join-Path $env:RUNNER_TEMP "khong-phai") -NguonMoi "$env:GITHUB_WORKSPACE" -NoBuild
           if ($LASTEXITCODE -eq 0) { throw "phải từ chối thư mục sai" }
           Write-Host "ĐẠT"

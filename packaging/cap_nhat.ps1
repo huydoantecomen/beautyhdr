@@ -183,9 +183,10 @@ try {
     Save-Root $root
     if ($NoBuild) { exit 0 }
     $build = Join-Path $root "ma-nguon\packaging\build_windows.ps1"
-    $args2 = @("-CapNhat")
-    if ($Flavor) { $args2 += @("-Flavor", $Flavor) }
-    & $build @args2
+    # Bảng băm (không phải mảng): splat mảng truyền theo vị trí, "-CapNhat" rơi vào tham số đầu tiên (Flavor) → lỗi ValidateSet
+    $buildArgs = @{ CapNhat = $true }
+    if ($Flavor) { $buildArgs["Flavor"] = $Flavor }
+    & $build @buildArgs
     exit $LASTEXITCODE
 } catch {
     Write-Host ""

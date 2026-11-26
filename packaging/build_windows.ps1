@@ -25,6 +25,8 @@ param(
 )
 if ($CapNhat) { $NoModels = $true; $NoInstaller = $true }
 $FlavorGiven = $PSBoundParameters.ContainsKey("Flavor")
+# Kiểm thử gọi script (packaging\cap_nhat.ps1, CI): chỉ in tham số đã nhận rồi thoát, không build
+if ($env:NETANH_KIEM_THAM_SO -eq "1") { Write-Host "THAMSO CapNhat=$CapNhat Flavor=$Flavor FlavorGiven=$FlavorGiven"; exit 0 }
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"  # PowerShell 5.1 tải file chậm hẳn khi vẽ thanh tiến độ
 $env:PYTHONUTF8 = "1"
