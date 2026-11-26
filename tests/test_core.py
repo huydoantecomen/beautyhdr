@@ -1248,7 +1248,7 @@ def test_progress_track_and_warnings():
     t.start(60)
     t.feed("Đang làm nét toàn ảnh bằng DAT-2 trên CPU…")
     t.feed("DAT-2: 40%")
-    assert t.step == "Làm nét nền 40%" and 30 <= t.pct <= 40
+    assert t.step == "Làm nét nền (bước này 40%)" and 30 <= t.pct <= 40
     t.feed("Đang làm nét khuôn mặt 2/5…")
     assert t.step == "Mặt 2/5" and t.pct > 70
     assert t.warning() == ""

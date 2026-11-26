@@ -33,10 +33,27 @@ def skin_mask512(labels: np.ndarray) -> np.ndarray:
     return m
 
 
+BIG_SIGMA = 12.0  # trên mức này làm mờ trên ảnh thu nhỏ (gblur)
+
+
+def gblur(x: np.ndarray, sigma: float) -> np.ndarray:
+    """Gauss như cv2.GaussianBlur nhưng nhanh với σ lớn: thu nhỏ d lần (σ còn ≥ 4 px), làm mờ, phóng lại. Nhân Gauss
+    rộng σ = 100 px (mặt to trên ảnh phóng 4×) dài ~600 px mỗi chiều nên chậm; kết quả mờ mịn nên thu nhỏ không mất
+    gì thấy được (đo: lệch < 0,3 mức xám trên ảnh ra)."""
+    if sigma <= BIG_SIGMA:
+        return cv2.GaussianBlur(x, (0, 0), sigma)
+    h, w = x.shape[:2]
+    d = int(sigma // 4)
+    sw, shh = max(2, round(w / d)), max(2, round(h / d))
+    small = cv2.resize(x, (sw, shh), interpolation=cv2.INTER_AREA)
+    small = cv2.GaussianBlur(small, (0, 0), sigma * sw / w)
+    return cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
+
+
 def _nblur(x: np.ndarray, w: np.ndarray, sigma: float) -> np.ndarray:
     """Làm mờ có trọng số (chỉ lấy điểm có w > 0): Gauss(x·w) / Gauss(w)."""
-    num = cv2.GaussianBlur(x * w, (0, 0), sigma)
-    den = cv2.GaussianBlur(w, (0, 0), sigma)
+    num = gblur(x * w, sigma)
+    den = gblur(w, sigma)
     return num / np.maximum(den, 1e-4)
 
 
@@ -67,11 +84,12 @@ def shine_map(lab: np.ndarray, mask: np.ndarray, face_px: float) -> tuple[np.nda
     return np.clip(S, 0, 1), dict(Lm=Lm, am=am, bm=bm, Lb=Lb, ab=ab, bb=bb, excess=excess, s_mid=s_mid)
 
 
-def remove_shine_lab(lab: np.ndarray, mask: np.ndarray, amount: float, face_px: float) -> np.ndarray:
+def remove_shine_lab(lab: np.ndarray, mask: np.ndarray, amount: float, face_px: float, pre=None) -> np.ndarray:
+    """`pre`: kết quả shine_map(lab, mask, face_px) đã tính (khỏi tính lại)."""
     amount = float(np.clip(amount, 0, 1))
     if amount <= 1e-3 or float(mask.max()) <= 1e-3:
         return lab
-    S, p = shine_map(lab, mask, face_px)
+    S, p = pre if pre is not None else shine_map(lab, mask, face_px)
     L, a, b = lab[..., 0], lab[..., 1], lab[..., 2]
     k = amount * S
     excess = np.maximum(p["excess"], 0.0)
@@ -130,10 +148,10 @@ def remove_shine(img: np.ndarray, mask: np.ndarray, amount: float, face_px: floa
     crop = img[y0:y1, x0:x1].astype(np.float32) / 255.0
     m = mask[y0:y1, x0:x1].astype(np.float32)
     lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
+    pre = shine_map(lab, m, face_px)
     if stats is not None:
-        S, _ = shine_map(lab, m, face_px)
-        stats["shine"] = float((S * m).sum() / max(float(m.sum()), 1.0))
-    lab2 = remove_shine_lab(lab, m, amount, face_px)
+        stats["shine"] = float((pre[0] * m).sum() / max(float(m.sum()), 1.0))
+    lab2 = remove_shine_lab(lab, m, amount, face_px, pre)
     res = cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR)
     res = crop + m[..., None] * (res - crop)  # ngoài da giữ nguyên tuyệt đối
     out = img.copy()

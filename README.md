@@ -156,6 +156,17 @@ App Android bật **Chất lượng cao nhất** thì gửi ảnh tới PC này 
 có thì điện thoại tự xử lý trên máy. Mở **Beauty HDR - Máy chủ cho điện thoại** (menu Start), `may_chu.bat` hoặc
 `python -m net_anh.server`. Cài đặt, ghép nối, dùng ở ngoài qua Tailscale, API: [docs/MAY_CHU.md](docs/MAY_CHU.md).
 
+## Thay đổi ở 0.15.1 (sửa từ máy thật)
+
+- "Chọn GPU mà render lại dùng CPU": model AI vẫn chạy trên GPU (ô Nền ghi "(fp32)" chỉ khi chạy GPU), nhưng các bước
+  màu, tông, khử bóng da, ghép mặt là xử lý ảnh trên CPU và chiếm phần lớn thời gian; đồng hồ GPU của Windows / Game Bar
+  chỉ đếm phần 3D, không đếm CUDA (xem Task Manager → GPU → "Cuda" hoặc "Compute"). Tóm tắt kết quả giờ ghi tách thời
+  gian model AI trên GPU và phần xử lý trên CPU. Khử bóng da nhanh hơn khoảng 3 giây mỗi ảnh (làm mờ σ lớn trên ảnh thu
+  nhỏ, tính bản đồ bóng một lần; lệch trung bình 0,03 mức xám). Chọn GPU mà ảnh thật sự chạy CPU (GPU lỗi giữa chừng):
+  thanh trạng thái báo ⚠ kèm lý do.
+- Khu tiến độ mới ở đáy vùng ảnh (thay thanh 4 px trong thanh trạng thái bị cắt chữ): tên bước đang làm, thanh % cao
+  theo cỡ chữ, thời gian đã chạy và còn lại ước tính, nút Huỷ; cỡ theo cỡ chữ hệ thống nên không bị cắt ở DPI cao.
+
 ## Thay đổi ở 0.15.0 (tối ưu theo dòng card đồ hoạ)
 
 - Tự nhận dòng card và bộ nhớ (`net_anh/gpu_profile.py`): NVIDIA theo thế hệ chip đọc từ driver (GTX 900, GTX 10, GTX 16,

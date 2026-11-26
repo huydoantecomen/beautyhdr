@@ -740,3 +740,84 @@ def test_bench_records_and_import_tool(tmp_path):
     assert tool.merge(store, tool.records_of(rep)) == len(rs)
     assert tool.merge(store, tool.records_of(rep)) == 0  # gộp lại cùng file: không trùng
     assert "rtx30" in tool.summary(store)
+
+
+# ---------------------------------------------------------------- GPU chạy thật hay CPU: đo và báo
+
+def test_gblur_matches_opencv_for_big_sigma():
+    import cv2
+
+    from net_anh import deshine
+
+    rng = np.random.default_rng(0)
+    x = cv2.GaussianBlur(rng.random((700, 900)).astype(np.float32), (0, 0), 3)
+    x[200:400, 300:600] += 1.0
+    for sg in (5.0, 20.0, 60.0, 110.0):
+        a = cv2.GaussianBlur(x, (0, 0), sg)
+        b = deshine.gblur(x, sg)
+        assert b.shape == a.shape and float(np.abs(a - b).max()) < 0.03, sg
+
+
+def test_report_splits_model_time_and_flags_cpu_fallback(fake_engine):
+    from net_anh.settings import Settings
+
+    rng = np.random.default_rng(3)
+    img = np.clip(rng.normal(128, 40, (90, 120, 3)), 0, 255).astype(np.uint8)
+    e = fake_engine("gtx16", (7, 5), 6.0)
+    _, rep = e.process(img, Settings(mode="upscale", upscale=4))
+    assert rep.device_kind == "cuda" and 0 < rep.model_s <= rep.seconds
+    assert "model AI trên GPU" in rep.summary()
+
+
+def test_gui_warns_when_gpu_chosen_but_cpu_used(monkeypatch):
+    from types import SimpleNamespace
+
+    from net_anh import gui
+    from net_anh.pipeline import Report
+
+    win = SimpleNamespace(device=SimpleNamespace(currentData=lambda: "cuda:0"),
+                          _devices=[SimpleNamespace(kind="cuda"), SimpleNamespace(kind="cpu")])
+    rep = Report(device_kind="cpu", notes=["GPU lỗi (RuntimeError: x): đã chạy lại bằng CPU"])
+    w = gui.MainWindow._gpu_warning(win, rep)
+    assert w.startswith("⚠") and "GPU lỗi" in w
+    assert gui.MainWindow._gpu_warning(win, Report(device_kind="cuda")) == ""
+    win.device = SimpleNamespace(currentData=lambda: "cpu")
+    assert gui.MainWindow._gpu_warning(win, rep) == ""
+
+
+def test_gui_progress_panel_readable(monkeypatch, tmp_path):
+    """Khu tiến độ riêng (không nằm trong thanh trạng thái 4 px): bước, % trên thanh cao theo cỡ chữ, thời gian."""
+    app = _app(monkeypatch, tmp_path)
+    from net_anh import gui
+    w = gui.MainWindow()
+    w.resize(900, 600)
+    w.show()
+    monkeypatch.setattr(w, "_busy", lambda: True)
+    w.track.start(40)
+    for m in ("Đang làm nét toàn ảnh…", "Real-ESRGAN: 50%"):
+        w._job_msg(m)
+    w.say("Real-ESRGAN: 50%")
+    w._update_buttons()
+    app.processEvents()
+    assert w.prog_panel.isVisible() and w.btn_cancel.isVisible()
+    assert w.progress.height() >= w.progress.fontMetrics().height() * 1.4
+    assert w.progress.format() == f"{w.track.pct}%" and "bước này 50%" in w.prog_step.toolTip()
+    assert "còn khoảng" in w.prog_time.text()
+    assert "Real-ESRGAN: 50%" not in w.status_lbl.text()  # không lặp chữ ở thanh trạng thái
+    monkeypatch.setattr(w, "_busy", lambda: False)
+    w._update_buttons()
+    assert not w.prog_panel.isVisible()
+    w.close()
+    app.processEvents()
+
+
+def test_progress_remaining_estimate():
+    from net_anh.gui import ProgressTrack
+
+    now = [0.0]
+    t = ProgressTrack(clock=lambda: now[0])
+    t.start(0)
+    assert t.remaining() is None and "còn" not in t.time_text()
+    now[0] = 10.0
+    t._set(50, "x")
+    assert abs(t.remaining() - 10.0) < 1e-6

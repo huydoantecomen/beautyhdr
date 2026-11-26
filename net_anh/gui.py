@@ -263,7 +263,7 @@ class ProgressTrack:
             return
         pre = f"Ảnh {self.batch[0]}/{self.batch[1]} · " if self.batch else ""
         if (r := re.match(r"(.+?):\s*(\d+)%$", m)):  # Real-ESRGAN: 40%  (từng hàng ô của model nền)
-            self._set(12 + 0.58 * int(r[2]), pre + f"Làm nét nền {r[2]}%")
+            self._set(12 + 0.58 * int(r[2]), pre + f"Làm nét nền (bước này {r[2]}%)")
         elif (r := re.search(r"khuôn mặt (\d+)/(\d+)", m)):
             i, n = int(r[1]), int(r[2])
             self._set(74 + 20 * (i - 1) / n, pre + f"Mặt {i}/{n}")
@@ -285,6 +285,20 @@ class ProgressTrack:
     def bar_text(self) -> str:
         t = f"{self.step} · {self.pct}% · {fmt_clock(self.elapsed())}"
         return t + (f" / ~{fmt_clock(self.eta)}" if self.eta >= 5 else "")
+
+    def remaining(self) -> float | None:
+        """Giây còn lại ước tính: theo ước tính ban đầu nếu còn đúng, không thì suy từ % đã xong (từ 8 % trở lên)."""
+        el = self.elapsed()
+        by_pct = el * (100 - self.pct) / self.pct if self.pct >= 8 else None
+        if self.eta >= 5 and el < self.eta:
+            left = self.eta - el
+            return left if by_pct is None else (left + by_pct) / 2
+        return by_pct
+
+    def time_text(self) -> str:
+        left = self.remaining()
+        t = f"Đã chạy {fmt_clock(self.elapsed())}"
+        return t + (f" · còn khoảng {fmt_clock(max(1.0, left))}" if left is not None else "")
 
     def warning(self) -> str:
         el, still = self.elapsed(), self.clock() - self.t_last
@@ -614,6 +628,12 @@ QListWidget::item:hover:!selected { background: #383838; }
 QHeaderView::section { background: #353535; border: 0; border-right: 1px solid #1d1d1d; padding: 3px 6px; }
 QProgressBar { background: #3c3c3c; border: 0; max-height: 4px; min-height: 4px; }
 QProgressBar::chunk { background: #5b9bd5; }
+QProgressBar#bigbar { background: #3c3c3c; border: 1px solid #4a4a4a; border-radius: 4px; max-height: 999px;
+                      min-height: 0px; color: #ffffff; font-weight: bold; text-align: center; }
+QProgressBar#bigbar::chunk { background: #3f7fc0; border-radius: 3px; }
+QFrame#progpanel { background: #20262d; border-top: 2px solid #3f7fc0; }
+QLabel#progstep { color: #ffffff; font-weight: bold; }
+QLabel#progtime { color: #c8d3de; }
 QScrollBar:vertical { background: #2a2a2a; width: 10px; margin: 0; }
 QScrollBar::handle:vertical { background: #4a4a4a; min-height: 24px; }
 QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
@@ -1954,7 +1974,13 @@ class MainWindow(QMainWindow):
         for i in range(3):
             self.splitter.setCollapsible(i, i == 0)
         self.splitter.setSizes([round(260 * fk), 820, round(380 * fk)])
-        self.setCentralWidget(self.splitter)
+        central = QWidget()
+        cl = QVBoxLayout(central)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(0)
+        cl.addWidget(self.splitter, 1)
+        cl.addWidget(self._build_progress_panel())
+        self.setCentralWidget(central)
 
         # --- nhật ký (Xem → Nhật ký), thanh trạng thái
         self.log = QPlainTextEdit()
@@ -1981,25 +2007,16 @@ class MainWindow(QMainWindow):
         self.status_lbl = QLabel()
         self.status_lbl.setMinimumWidth(10)
         sb.addWidget(self.status_lbl, 1)
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setFixedWidth(round(300 * QApplication.font().pointSizeF() / 9.0))
-        self.progress.setTextVisible(True)
-        self.progress.setFixedHeight(round(20 * QApplication.font().pointSizeF() / 9.0))
-        self.progress.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.progress.hide()
         self.track = ProgressTrack()
         self._tick = QTimer(self)
         self._tick.setInterval(1000)
         self._tick.timeout.connect(self._show_progress)
         self.btn_cancel = QPushButton("Huỷ")
-        self.btn_cancel.setObjectName("lnk")
         self.btn_cancel.clicked.connect(self.cancel)
         self.btn_cancel.hide()
         self.dev_lbl = QLabel()
         self.dev_lbl.setToolTip("Máy: " + self.hw_text)
-        sb.addPermanentWidget(self.progress)
-        sb.addPermanentWidget(self.btn_cancel)
+        self.prog_panel.layout().addWidget(self.btn_cancel)
         sb.addPermanentWidget(self.dev_lbl)
         self._lock_widgets = [sp, sw, pt, ht, self.btn_reset_adj, self.btn_restore]
         self._lock_actions = [self.a_reset, self.a_damage, self.a_presets]
@@ -2683,6 +2700,8 @@ class MainWindow(QMainWindow):
 
     def say(self, msg: str):
         self.log.appendPlainText(msg)
+        if re.match(r".+:\s*\d+%$", msg.strip()):  # "Real-ESRGAN: 16%": đã hiện ở khu tiến độ, khỏi lặp ở thanh trạng thái
+            return
         self.status_lbl.setText(msg.splitlines()[0] if msg else "")
 
     def _busy(self) -> bool:
@@ -2718,7 +2737,7 @@ class MainWindow(QMainWindow):
         self.a_undo.setEnabled(not busy and len(self.results) > 1)
         for w in (self.btn_restore, self.a_restore):
             w.setEnabled(not busy and has_res)
-        self.progress.setVisible(busy)
+        self.prog_panel.setVisible(busy)
         if not busy and getattr(self, "status_lbl", None) is not None and self.status_lbl.text().startswith("⚠"):
             self.status_lbl.setStyleSheet("")
 
@@ -2772,6 +2791,44 @@ class MainWindow(QMainWindow):
             self.job.stop = True
             self.say("Đang huỷ…")
 
+    def _build_progress_panel(self) -> QFrame:
+        """Khu tiến độ riêng ở đáy vùng ảnh (không nằm trong thanh trạng thái): tên bước đang làm, thanh % to có chữ,
+        thời gian đã chạy và còn lại, nút Huỷ. Cỡ theo cỡ chữ hệ thống (fontMetrics) nên không bị cắt ở DPI cao hay cửa
+        sổ hẹp: tên bước tự rút gọn (…) khi thiếu chỗ, chữ đầy đủ xem ở tooltip."""
+        fm = QApplication.fontMetrics()
+        panel = QFrame()
+        panel.setObjectName("progpanel")
+        lay = QHBoxLayout(panel)
+        pad = max(6, fm.height() // 2)
+        lay.setContentsMargins(pad * 2, pad, pad * 2, pad)
+        lay.setSpacing(pad * 2)
+        self.prog_step = QLabel("Chuẩn bị")
+        self.prog_step.setObjectName("progstep")
+        self.prog_step.setMinimumWidth(fm.horizontalAdvance("Làm nét nền 100%") + pad)
+        self.prog_step.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.progress = QProgressBar()
+        self.progress.setObjectName("bigbar")
+        self.progress.setRange(0, 100)
+        self.progress.setTextVisible(True)
+        self.progress.setFormat("%p%")
+        self.progress.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.progress.setFixedHeight(round(fm.height() * 1.7))
+        self.progress.setMinimumWidth(fm.horizontalAdvance("0") * 16)
+        self.prog_time = QLabel("")
+        self.prog_time.setObjectName("progtime")
+        self.prog_time.setMinimumWidth(fm.horizontalAdvance("Đã chạy 00:00 · còn khoảng 00:00") + pad)
+        lay.addWidget(self.prog_step, 3)
+        lay.addWidget(self.progress, 4)
+        lay.addWidget(self.prog_time, 0)
+        panel.setVisible(False)
+        self.prog_panel = panel
+        return panel
+
+    def _set_step_text(self, text: str) -> None:
+        w = max(40, self.prog_step.width())
+        self.prog_step.setText(self.prog_step.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, w))
+        self.prog_step.setToolTip(text)
+
     def _job_msg(self, msg: str):
         self.track.feed(msg)
         self._show_progress()
@@ -2781,7 +2838,10 @@ class MainWindow(QMainWindow):
             return
         t = self.track
         self.progress.setValue(t.pct)
-        self.progress.setFormat(t.bar_text())
+        self.progress.setFormat(f"{t.pct}%")
+        self.progress.setToolTip(t.bar_text())
+        self._set_step_text(t.step)
+        self.prog_time.setText(t.time_text())
         for b in (self.btn_run, self.btn_run_simple):
             b.setText(f"Huỷ · {t.pct}%")
         warn = t.warning()
@@ -2899,9 +2959,23 @@ class MainWindow(QMainWindow):
 
         self._start(work, self._finished, "xử lý ảnh")
 
+    def _gpu_warning(self, rep) -> str:
+        """Đã chọn GPU (hoặc Tự động trên máy có GPU dùng được) mà ảnh chạy bằng CPU: lý do rõ ràng thay vì im lặng."""
+        want = self.device.currentData()
+        has_gpu = any(d.kind != "cpu" for d in getattr(self, "_devices", []))
+        if rep.device_kind != "cpu" or want == "cpu" or not has_gpu:
+            return ""
+        why = next((n for n in rep.notes if n.startswith("GPU lỗi")), "")
+        return ("⚠ Đã chọn GPU nhưng ảnh này chạy bằng CPU (chậm hơn nhiều)"
+                + (f": {why}" if why else ". Mở lại app để thử lại GPU; nếu vẫn vậy, gửi dòng này và ô Thiết bị cho người phát triển."))
+
     def _finished(self, payload):
         res, rep, s = payload
+        warn = self._gpu_warning(rep)
         self.say(rep.summary())
+        if warn:  # sau tóm tắt để là dòng cuối, nổi trên thanh trạng thái
+            self._device_changed()
+            self.say(warn)
         self.results.append((res, s, rep.mode, rep.seconds))
         self._models_used[id(res)] = rep.models()
         self.view.after_label = rep.models()
@@ -3024,6 +3098,9 @@ class MainWindow(QMainWindow):
                         si = si.with_(phone=detect_phone(f)[0], wb=-1.0, skin_tone=-1.0)
                     res, rep = e.process(img, si)
                     job.message.emit(f"   {rep.models()}")
+                    warn = self._gpu_warning(rep)
+                    if warn:
+                        job.message.emit("   " + warn)
                     with runner.lock:  # giữ tên file ra: ảnh trước có thể chưa ghi xong
                         dst_path = unique_output_path(f, Path(dst), ext)
                         k = 2

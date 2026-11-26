@@ -55,6 +55,8 @@ class Report:
     styled: bool = False  # đã áp preset đối tượng lên mặt
     bg_model: str = ""  # model nền thật sự đã chạy, kèm kiểu số trên GPU
     deshined: int = 0  # số mặt đã khử bóng da
+    device_kind: str = ""  # thiết bị thật sự đã chạy model: "cuda" | "xpu" | "cpu"…
+    model_s: float = 0.0  # thời gian chạy model AI (nền, mặt, tìm mặt, tách vùng mặt); còn lại là xử lý ảnh trên CPU
 
     def models(self) -> str:
         parts = []
@@ -78,6 +80,9 @@ class Report:
         parts = [("⚠ AI lỗi, chỉ xử lý nhanh" if self.ai_fallback else MODES.get(self.mode, self.mode)), self.models(),
                  f"Thiết bị: {self.device}",
                  f"Thời gian: {self.seconds:.1f} s"]
+        if self.model_s > 0 and self.device_kind not in ("", "cpu"):
+            parts.append(f"model AI trên GPU {self.model_s:.1f} s, xử lý màu/tông/ghép mặt trên CPU "
+                         f"{max(0.0, self.seconds - self.model_s):.1f} s")
         if self.faces_found:
             parts.append(f"Khuôn mặt: làm nét {self.faces_restored}/{self.faces_found}"
                          + (f" ({self.faces_kept} mặt lỗi model, giữ nguyên)" if self.faces_kept else ""))
@@ -335,12 +340,35 @@ class Enhancer:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
         self.cancel_requested: Callable[[], bool] = lambda: False
+        self._model_s = 0.0
+        self._esrgan_run = self._timed(self._esrgan_run)  # đo phần chạy model (Report.model_s)
+        self._face_run = self._timed(self._face_run)
         self._esrgan: dict = {}
         self._sr_extra: dict = {}  # model nền nạp bằng spandrel (DAT-2, RealPLKSR): model_id → (mạng, kiểu số)
         self._gfpgan: torch.nn.Module | None = None
         self._helper = None
         self._agegender = None
         self._faces: list | None = None
+
+    def _timed(self, fn):
+        """Bọc hàm chạy model: cộng thời gian vào self._model_s (chờ GPU xong để đo đúng)."""
+        def run(*a, **kw):
+            t = time.perf_counter()
+            try:
+                return fn(*a, **kw)
+            finally:
+                self._sync()
+                self._model_s = getattr(self, "_model_s", 0.0) + time.perf_counter() - t
+        return run
+
+    def _sync(self) -> None:
+        try:
+            if self.dev.kind == "cuda":
+                torch.cuda.synchronize()
+            elif self.dev.kind == "xpu":
+                torch.xpu.synchronize()
+        except Exception:
+            pass
 
     def _empty_cache(self) -> None:
         try:
@@ -605,9 +633,12 @@ class Enhancer:
     @torch.no_grad()
     def _parse(self, helper, face512: np.ndarray) -> np.ndarray:
         """Nhãn ParseNet (512×512) của mặt đã căn."""
+        t0 = time.perf_counter()
         x = cv2.cvtColor(face512, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         t = torch.from_numpy(((x - 0.5) / 0.5).transpose(2, 0, 1)).unsqueeze(0).to(helper.device)
-        return helper.face_parse(t)[0].argmax(dim=1).squeeze().cpu().numpy()
+        lab = helper.face_parse(t)[0].argmax(dim=1).squeeze().cpu().numpy()
+        self._model_s = getattr(self, "_model_s", 0.0) + time.perf_counter() - t0
+        return lab
 
     def _subjects(self, img: np.ndarray, lms: list, s: Settings, rep: "Report") -> list[str | None]:
         """Đối tượng của từng mặt (khoá facestyle.SUBJECT_KEYS, None = không áp preset). Đoán tuổi, giới tính lỗi
@@ -825,6 +856,7 @@ class Enhancer:
             self._helper = FaceRestoreHelper(upscale, face_size=512, crop_ratio=(1, 1),
                                              det_model="retinaface_resnet50", save_ext="png", use_parse=True,
                                              device=det_device, model_rootpath=str(weights.weights_dir()))
+            self._helper.get_face_landmarks_5 = self._timed(self._helper.get_face_landmarks_5)
         self._helper.clean_all()
         self._helper.set_upscale_factor(upscale)
         return self._helper
@@ -1042,6 +1074,7 @@ class Enhancer:
         s = s or Settings()
         rep = Report(mode=s.mode, device=self.dev.name)
         t0 = time.perf_counter()
+        self._model_s = 0.0
         h, w = img.shape[:2]
         if max(h, w) > MAX_SIDE:
             img = resize_long(img, MAX_SIDE)  # chặn mỗi cạnh tối thiểu 1 px (ảnh dải rất dài và hẹp)
@@ -1155,6 +1188,9 @@ class Enhancer:
             except Exception as e:  # không để lỗi đổi nền làm mất cả kết quả
                 rep.notes.append(f"Không đổi được nền ({e.__class__.__name__})")
         rep.seconds = time.perf_counter() - t0
+        rep.model_s = self._model_s
+        rep.device_kind = self.dev.kind
+        rep.device = self.dev.name
         return out, rep
 
     def _fix_color(self, img: np.ndarray, s: Settings, rep: "Report") -> tuple[np.ndarray, Settings]:
