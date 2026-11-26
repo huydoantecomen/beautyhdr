@@ -6,6 +6,11 @@ name: Release exe
 
 on:
   workflow_dispatch:
+    inputs:
+      nhap:
+        description: "Chỉ tạo bản nháp (draft): exe người dùng chưa nhận, bấm Publish trên trang Releases khi duyệt"
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
 
@@ -89,4 +94,6 @@ jobs:
           cat rel/update.json
           ls -la rel
           gh release delete "v$VER" -y --cleanup-tag || true
-          gh release create "v$VER" rel/* --title "Beauty HDR $VER" --notes "Tải BeautyHDR.exe và chạy: app và model tự tải về, mở lần sau tự cập nhật. Các file BeautyHDR-app-* là phần gói app, không cần tải tay."
+          DRAFT=""
+          if [ "${{ inputs.nhap }}" = "true" ]; then DRAFT="--draft"; fi
+          gh release create "v$VER" rel/* $DRAFT --target "${{ github.sha }}" --title "Beauty HDR $VER" --notes "Tải BeautyHDR.exe và chạy: app và model tự tải về, mở lần sau tự cập nhật. Các file BeautyHDR-app-* là phần gói app, không cần tải tay."
