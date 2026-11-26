@@ -25,7 +25,7 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File packaging\cap_nhat.ps1 -Target $old -NguonMoi "$env:GITHUB_WORKSPACE" -NoBuild
           if ($LASTEXITCODE -ne 0) { throw "cap_nhat.ps1 lỗi $LASTEXITCODE" }
           $v = Get-Content -LiteralPath (Join-Path $old "ma-nguon\net_anh\__init__.py") -Raw
-          if ($v -notmatch '0\.15') { throw "chưa ghi đè: $v" }
+          if ($v -notmatch ([regex]::Escape(([regex]::Match((Get-Content -LiteralPath net_anh\__init__.py -Raw), '__version__ = "([^"]+)"')).Groups[1].Value))) { throw "chưa ghi đè: $v" }
           if (-not (Test-Path -LiteralPath (Join-Path $old "ma-nguon\_build"))) { throw "mất _build" }
           # đường gọi build_windows.ps1 thật (không build): -CapNhat phải vào đúng tham số, không rơi vào -Flavor
           $env:NETANH_KIEM_THAM_SO = "1"
@@ -49,11 +49,11 @@ jobs:
           $o4 = powershell -NoProfile -ExecutionPolicy Bypass -STA -File packaging\cap_nhat.ps1 -Target $dir -NguonMoi "$env:GITHUB_WORKSPACE" -KhongMo -BoQuaPip 2>&1 | Out-String
           Write-Host $o4
           # (chỉ so mẫu ASCII: script inline của runner không có BOM nên chữ có dấu trong mẫu bị đọc sai)
-          if ($o4 -notmatch "XONG[^\r\n]*0\.15\.1") { throw "chay thang (tu nhan) loi: $o4" }
+          if ($o4 -notmatch ("XONG[^\r\n]*" + ([regex]::Escape(([regex]::Match((Get-Content -LiteralPath net_anh\__init__.py -Raw), '__version__ = "([^"]+)"')).Groups[1].Value)))) { throw "chay thang (tu nhan) loi: $o4" }
           if (-not (Test-Path -LiteralPath (Join-Path $dir "ma-nguon\giu-lai.txt"))) { throw "mất file riêng" }
           # ép bằng CAP_NHAT_CHAY_THANG.bat (-Mode chay)
           $o5 = powershell -NoProfile -ExecutionPolicy Bypass -STA -File packaging\cap_nhat.ps1 -Mode chay -Target $dir -NguonMoi "$env:GITHUB_WORKSPACE" -KhongMo -BoQuaPip 2>&1 | Out-String
-          if ($o5 -notmatch "XONG[^\r\n]*0\.15\.1") { throw "chay thang (-Mode chay) loi: $o5" }
+          if ($o5 -notmatch ("XONG[^\r\n]*" + ([regex]::Escape(([regex]::Match((Get-Content -LiteralPath net_anh\__init__.py -Raw), '__version__ = "([^"]+)"')).Groups[1].Value)))) { throw "chay thang (-Mode chay) loi: $o5" }
           # chưa cài, chưa có .venv: báo rõ cách làm
           $trong = Join-Path $env:RUNNER_TEMP "chua-co-venv"
           New-Item -ItemType Directory -Force -Path (Join-Path $trong "ma-nguon\net_anh") | Out-Null
