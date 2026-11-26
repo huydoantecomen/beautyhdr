@@ -1,0 +1,20 @@
+BỘ PRESET ẢNH THẺ THEO ĐỐI TƯỢNG (Beauty HDR PC 0.14.1 trở lên; từ 0.14.2 có sẵn trong thư mục cài, thư mục presets)
+
+File:
+  anh-the-4-nhom.netanh.json   cả 4 bộ trong một file (nạp một lần)
+  anh-the-nam-tre / nu-tre / nam-gia / nu-gia .netanh.json   từng bộ riêng để chia sẻ
+
+Từ 0.15.2 4 bộ này đã có sẵn trong app, không cần nạp (file ở đây chỉ để gửi người khác). Cách nạp cũ: chế độ Chuyên sâu, cạnh ô bộ preset bấm "Quản lý…" > "Nạp từ file…" > chọn anh-the-4-nhom.netanh.json.
+
+Cách dùng cho một ảnh thẻ (chọn đúng nhóm của người trong ảnh, 2 chỗ):
+  1. Ô bộ preset (cạnh nút Quản lý…): chọn "Ảnh thẻ · Nam trẻ" (hoặc Nữ trẻ, Nam lớn tuổi, Nữ lớn tuổi)
+  2. Ô "Tông mẫu" (Chuyên sâu) hoặc "Tông màu" (Đơn giản): chọn tông cùng tên, ví dụ "Ảnh thẻ nam trẻ (Ảnh thẻ · Nam trẻ)"
+  3. Nên tích "Khử bóng loáng da" nếu da bóng dầu (mỗi bộ đã cộng thêm sẵn 0,15–0,3)
+  4. Muốn đổi nền: bật "Nền mới" và chọn màu (trắng / xanh). Phần này không nằm trong file preset.
+  Mức nét: để Tự động.
+
+Mỗi bộ ép cùng một kiểu mặt cho mọi khuôn mặt (không dựa vào đoán tuổi, vì máy đoán người già đúng chỉ 57–79 %).
+
+Bộ lớn tuổi KHÔNG làm trẻ hoá: giữ 65–70 % mặt gốc, không mịn da, gần như không xoá vết, làm sáng da rất ít.
+Số đo (so-do.txt, tuổi2 = InsightFace, âm = trẻ đi): Da đẹp ảnh thẻ làm nam lớn tuổi trẻ đi ~21 tuổi, nữ ~13 tuổi;
+bộ mới −2 và −4 (ảnh không preset: +1 và −2.5), nếp nhăn giữ như ảnh gốc.

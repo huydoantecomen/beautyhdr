@@ -97,13 +97,16 @@ LOOKS: dict[str, Look] = {
     "da_dep_the": Look(name="Da đẹp ảnh thẻ", skin_light=0.9, even=0.7, clean=0.8, tidy=0.6, lips=0.6),
 }
 
+BG_DEV_MEAN, BG_DEV_P90 = 5.5, 11.0  # nền chỉ được làm phẳng khi độ lệch (ΔE) so với phông phẳng nhỏ: trung bình, phân vị 90
+BG_DEV_KEEP = (6.0, 14.0)  # điểm lệch hơn mức đầu bớt được làm phẳng, quá mức sau giữ nguyên (vết bẩn lệch ~6–10 vẫn sửa)
 CLEAN_CAP = (4.0, 11.0)  # độ lệch L (tầng giữa so với da quanh) được coi là vết: dưới 4 sửa hết, trên 11 là ngũ quan, không đụng
 CLEAN_CAP_A = (2.5, 8.0)  # tương tự cho độ đỏ a*
 
 SKIN_LIGHT_MAX = 12.0  # nâng sáng da tối đa (L): ảnh rất tối để bước sửa sáng lo, không kéo mặt thành mảng trắng
 LOW_T, HIGH_T = 9.0, 97.0  # đích p5, p95 của L khi kéo giãn dải sáng tối
 GAIN_MAX = 1.35
-SKIN_SIM = 10.0  # da ngoài mặt (tay, vai): khoảng cách a, b tới màu da giữa mặt, thang Gauss
+SKIN_REACH = 0.45  # da ngoài vùng ParseNet chỉ tính trong khoảng này (bề rộng mặt) quanh vùng da đã tách
+SKIN_SIM = 8.0  # da ngoài mặt (tay, vai): khoảng cách a, b tới màu da giữa mặt, thang Gauss
 SKIN_SIM_L = 32.0  # và lệch độ sáng tối đa coi là da
 
 
@@ -121,12 +124,21 @@ def _q(x: np.ndarray, m: np.ndarray, q: float = 50.0) -> float:
     return float(np.percentile(v, q)) if v.size else float("nan")
 
 
-def skin_weight(lab: np.ndarray, mk: Masks, core_ab: tuple[float, float], core_L: float) -> np.ndarray:
+def skin_weight(lab: np.ndarray, mk: Masks, core_ab: tuple[float, float], core_L: float, face_px: float = 200.0
+                ) -> np.ndarray:
     """Trọng số áp màu da: vùng da ParseNet, cộng chỗ cùng màu da giữa mặt (tay, vai, cổ ngoài khung mặt)."""
     a, b, L = lab[..., 1], lab[..., 2], lab[..., 0]
     d2 = (a - core_ab[0]) ** 2 + (b - core_ab[1]) ** 2
     sim = np.exp(-d2 / (2 * SKIN_SIM ** 2)) * np.clip(1 - (np.abs(L - core_L) - SKIN_SIM_L) / 10, 0, 1)
     sim *= np.clip(np.sqrt(a * a + b * b) / 6.0, 0, 1)  # trắng, xám không phải da
+    # chỉ vùng sát da đã tách (cổ, vai, tay gần mặt): đá be, váy hồng nhạt, tường cùng tông da ở xa mặt không được coi là da
+    # (trước 0.14.0 thử nghiệm: coi là da ở mọi nơi trong ảnh → mảng loang màu khắp ảnh)
+    h, w_ = mk.skin.shape
+    reach = max(3.0, SKIN_REACH * face_px)
+    near = cv2.GaussianBlur(cv2.dilate((mk.skin > 0.3).astype(np.uint8),
+                                       cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * int(reach) + 1,) * 2)
+                                       ).astype(np.float32), (0, 0), reach / 3.0)
+    sim = sim * near
     w = np.maximum(mk.skin, sim.astype(np.float32))
     w *= (1 - mk.lips) * (1 - mk.hair)
     return cv2.GaussianBlur(w.astype(np.float32), (0, 0), 1.5)
@@ -193,7 +205,7 @@ def apply(img: np.ndarray, mk: Masks, lk: Look, amount: float = 1.0, bg=None) ->
     face_px = float(np.sqrt(core.sum()))
 
     # 1. da: lệch a, b hằng số, đều màu, nâng sáng kiểu "screen"
-    ws = skin_weight(lab, mk, (ca, cb), cL) * amount
+    ws = skin_weight(lab, mk, (ca, cb), cL, face_px) * amount
     da, db = lk.skin * (lk.skin_a - ca), lk.skin * (lk.skin_b - cb)
     if lk.even > 1e-3:
         s = max(3.0, 0.06 * face_px)
@@ -229,7 +241,9 @@ def apply(img: np.ndarray, mk: Masks, lk: Look, amount: float = 1.0, bg=None) ->
     # 4. vùng trắng gần trung tính → trắng hơi lạnh
     if lk.white > 1e-3:
         C = np.sqrt(a * a + b * b)
-        ww = np.clip((L - 72.0) / 15.0, 0, 1) * np.clip(1 - C / 18.0, 0, 1) * (1 - ws) * amount * lk.white
+        # chỉ trắng thật (áo, phông trắng): sắc độ < 4 đầy đủ, hết ở 10. Váy kem, đá be, trời nhạt (sắc độ 8–18) không đụng,
+        # nếu không trọng số đổi mượt theo sắc độ sẽ tạo mảng loang trên các vùng nhạt màu
+        ww = np.clip((L - 78.0) / 12.0, 0, 1) * np.clip(1 - (C - 4.0) / 6.0, 0, 1) * (1 - ws) * amount * lk.white
         a = a * (1 - ww)
         b = b + ww * (-lk.cool - b)
 
@@ -295,7 +309,14 @@ def clean_backdrop(img: np.ndarray, amount: float, lift: float, protect: np.ndar
     smooth = np.where(den > 1e-3, num / np.maximum(den, 1e-3), bd.color_lab.reshape(1, 1, 3))
     flat = 0.5 * smooth + 0.5 * bd.color_lab.reshape(1, 1, 3)  # phông trơn, còn một nửa chuyển sáng tối rộng
     flat[..., 0] = np.clip(flat[..., 0] + lift, 0, 100)
-    wgt = cv2.GaussianBlur(mf, (0, 0), r / 2.0)[..., None] * amount
+    # phông thật sự trơn thì mọi điểm gần màu phông phẳng; cây, trời, tường có hoa văn thì lệch nhiều: không làm phẳng
+    # (làm phẳng sẽ phủ một lớp sương xám lên cây, trời, lộ rõ ranh giới), và điểm nào lệch xa vẫn giữ nguyên
+    dev = np.sqrt(((lab - flat) ** 2).sum(axis=2))
+    inside = mf > 0.5
+    if float(dev[inside].mean()) > BG_DEV_MEAN or float(np.percentile(dev[inside], 90)) > BG_DEV_P90:
+        return img, ""
+    keep = np.clip(1.0 - (dev - BG_DEV_KEEP[0]) / (BG_DEV_KEEP[1] - BG_DEV_KEEP[0]), 0, 1)[..., None]
+    wgt = cv2.GaussianBlur(mf, (0, 0), r / 2.0)[..., None] * amount * keep
     new = cv2.cvtColor(flat.astype(np.float32), cv2.COLOR_LAB2BGR) * 255.0
     out = img.astype(np.float32) * (1 - wgt) + new * wgt
     return np.clip(out + 0.5, 0, 255).astype(np.uint8), "làm phẳng nền"

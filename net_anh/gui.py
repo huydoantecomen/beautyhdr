@@ -20,10 +20,14 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QColorDialog, QInputDialog, QLineEdit, QTableWidgetItem, QTabWidget,
                                QVBoxLayout, QWidget)
 
-from . import facestyle, weights
+from . import facestyle, providers, sources, weights
+from .gui_sources import SourceDialog, ask_ddcolor, consent_api, consent_server
 from .subject import SUBJECTS
 from .analysis import Analysis, recommend
-from .device import list_devices
+from . import gpu_profile
+from .batch import BatchRunner, extra_engines
+from .batch import workers_for as batch_workers_for
+from .device import UNSUPPORTED, best_first, list_devices
 from . import hardware
 from .history import History
 from .levels import BG_MODELS, FACE_MODELS, LEVELS, auto_level, auto_upscale, level_for, level_settings, models_needed
@@ -260,7 +264,7 @@ class ProgressTrack:
             return
         pre = f"Ảnh {self.batch[0]}/{self.batch[1]} · " if self.batch else ""
         if (r := re.match(r"(.+?):\s*(\d+)%$", m)):  # Real-ESRGAN: 40%  (từng hàng ô của model nền)
-            self._set(12 + 0.58 * int(r[2]), pre + f"Làm nét nền {r[2]}%")
+            self._set(12 + 0.58 * int(r[2]), pre + f"Làm nét nền (bước này {r[2]}%)")
         elif (r := re.search(r"khuôn mặt (\d+)/(\d+)", m)):
             i, n = int(r[1]), int(r[2])
             self._set(74 + 20 * (i - 1) / n, pre + f"Mặt {i}/{n}")
@@ -282,6 +286,20 @@ class ProgressTrack:
     def bar_text(self) -> str:
         t = f"{self.step} · {self.pct}% · {fmt_clock(self.elapsed())}"
         return t + (f" / ~{fmt_clock(self.eta)}" if self.eta >= 5 else "")
+
+    def remaining(self) -> float | None:
+        """Giây còn lại ước tính: theo ước tính ban đầu nếu còn đúng, không thì suy từ % đã xong (từ 8 % trở lên)."""
+        el = self.elapsed()
+        by_pct = el * (100 - self.pct) / self.pct if self.pct >= 8 else None
+        if self.eta >= 5 and el < self.eta:
+            left = self.eta - el
+            return left if by_pct is None else (left + by_pct) / 2
+        return by_pct
+
+    def time_text(self) -> str:
+        left = self.remaining()
+        t = f"Đã chạy {fmt_clock(self.elapsed())}"
+        return t + (f" · còn khoảng {fmt_clock(max(1.0, left))}" if left is not None else "")
 
     def warning(self) -> str:
         el, still = self.elapsed(), self.clock() - self.t_last
@@ -420,11 +438,109 @@ class ModelsDialog(QDialog):
         self.refresh()
 
 
+def profile_text(dev, eng=None) -> str:
+    """Một dòng về cách app dùng card này: dòng card, kiểu số, cỡ ô, hàng loạt, mức hỗ trợ."""
+    fam = dev.family
+    parts = [f"Dòng: {fam.label}"]
+    if eng is not None and eng.precision:
+        used = sorted({v[0] for v in eng.precision.values()})
+        parts.append("kiểu số " + "/".join(used) + " (đã chạy thử, đạt)")
+    else:
+        parts.append("kiểu số: thử " + " → ".join(fam.precisions) + ", sai thì fp32")
+    if dev.vram_gb:
+        parts.append(f"VRAM {dev.vram_gb:.0f} GB ({gpu_profile.vram_class(dev.vram_gb)}): cắt ô theo bộ nhớ còn trống")
+    m = hardware.machine()
+    n = gpu_profile.batch_workers(dev.kind, dev.vram_gb, m.ram_gb, m.threads)
+    parts.append(f"thư mục: {n} ảnh song song" if n > 1 else "thư mục: nạp model một lần, đọc/ghi ảnh song song")
+    parts.append(f"hỗ trợ {fam.support}")
+    return " · ".join(parts)
+
+
+class CardsDialog(QDialog):
+    """Bảng khuyến nghị theo dòng card (gpu_profile.table), tô đậm dòng của máy này."""
+
+    COLS = ("Dòng card", "Ví dụ", "Kiểu số (thử theo thứ tự)", "Cắt ô (compact / DAT-2)", "Nên dùng", "Hàng loạt", "Mức hỗ trợ", "Ghi chú")
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Khuyến nghị theo card")
+        self.resize(1180, 720)
+        devs = getattr(parent, "_devices", [])
+        mine = next(iter(best_first([d for d in devs if d.kind != "cpu"])), None)
+        mine_key = mine.family.key if mine is not None else "cpu"
+        rows = gpu_profile.table()
+        head = QLabel(self._head(parent, mine))
+        head.setWordWrap(True)
+        t = QTableWidget(len(rows), len(self.COLS))
+        t.setHorizontalHeaderLabels(list(self.COLS))
+        t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        t.setWordWrap(True)
+        bold = QFont()
+        bold.setBold(True)
+        for r, (key, row) in enumerate(zip(gpu_profile.TABLE_ORDER, rows)):
+            for c, col in enumerate(self.COLS):
+                it = QTableWidgetItem(row[col])
+                it.setToolTip(row[col])
+                if key == mine_key:
+                    it.setFont(bold)
+                    it.setBackground(QColor("#3d4b59"))
+                t.setItem(r, c, it)
+        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        for c, w in enumerate((210, 200, 140, 250, 170, 160, 85, 380)):
+            t.setColumnWidth(c, w)
+        t.resizeRowsToContents()
+        note = QLabel("Kiểu số: app chạy thử từng model với một ảnh mẫu ở fp32 và ở kiểu nhanh hơn, lệch thì dùng fp32; "
+                      "khi chạy thật ô nào ra lỗi vẫn tự chạy lại fp32. Cắt ô: theo bộ nhớ GPU còn trống lúc chạy, thiếu "
+                      "thì tự chia nhỏ hơn. Tốc độ GPU trong ước tính thời gian là ước lượng, chưa đo trên từng dòng card.")
+        note.setWordWrap(True)
+        note.setObjectName("muted")
+        # bảng thứ hai: từng model trên card của máy này (kiểu số, kênh cuối, cỡ ô, thời gian dự kiến)
+        fam = mine.family if mine is not None else gpu_profile.FAMILIES["cpu"]
+        mrows = gpu_profile.model_rows(fam, getattr(mine, "vram_gb", 0.0) or 0.0, getattr(mine, "cc", None))
+        mt = QTableWidget(len(mrows), len(gpu_profile.MODEL_COLS))
+        mt.setHorizontalHeaderLabels(list(gpu_profile.MODEL_COLS))
+        mt.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        for r, row in enumerate(mrows):
+            for c, col in enumerate(gpu_profile.MODEL_COLS):
+                it = QTableWidgetItem(row[col])
+                it.setToolTip(row[col])
+                mt.setItem(r, c, it)
+        for c, w in enumerate((260, 70, 80, 170, 170, 260, 360)):
+            mt.setColumnWidth(c, w)
+        mt.setMaximumHeight(200)
+        self.model_table = mt
+        mhead = QLabel(f"<b>Từng model trên {fam.label}</b> (thời gian là ước lượng, chưa đo trên card này)")
+        lay = QVBoxLayout(self)
+        lay.addWidget(head)
+        lay.addWidget(t, 1)
+        lay.addWidget(mhead)
+        lay.addWidget(mt)
+        lay.addWidget(note)
+
+    @staticmethod
+    def _head(parent, mine) -> str:
+        m = hardware.machine()
+        if mine is not None:
+            eng = getattr(parent, "_engine", None)
+            same = eng is not None and eng.dev.device == mine.device
+            return f"<b>Máy này:</b> {mine.name} · {profile_text(mine, eng if same else None)}"
+        bad = "; ".join(f"{n}: {why}" for n, why in UNSUPPORTED)
+        g = m.unused_gpu
+        extra = bad or (hardware.advice(g) if g is not None else "")
+        return f"<b>Máy này:</b> {m.summary()}" + (f"<br>{extra}" if extra else "")
+
+
 def machine_advice(m: hardware.Machine, kind: str) -> str:
     """Một câu khuyên dùng model theo cấu hình máy (Quản lý model)."""
     vram = max((g.vram_gb for g in m.gpus if g.usable), default=0.0)
+    if kind == "cuda" and vram >= 11:
+        return ("GPU mạnh, nhiều bộ nhớ: dùng thoải mái model nặng (RestoreFormer++, DAT-2, mức 6); ảnh cắt thành ô lớn "
+                "hoặc không cắt, làm thư mục chạy song song.")
     if kind == "cuda" and vram >= 6:
         return "GPU đủ mạnh: dùng được cả model nặng (RestoreFormer++, DAT-2) với thời gian vài chục giây mỗi ảnh."
+    if kind == "cuda" and vram:
+        return ("GPU ít bộ nhớ (dưới 6 GB): model nhẹ chạy nhanh; model nặng vẫn chạy (app tự cắt ô nhỏ) nhưng chậm, "
+                "nên dùng mức 1–5.")
     if kind != "cpu":
         return ("Có GPU nhưng bộ nhớ ít hoặc không rõ: model nặng vẫn chạy (app tự chia ô nhỏ), chậm hơn. "
                 "Model nhẹ (mặc định) nhanh.")
@@ -513,6 +629,12 @@ QListWidget::item:hover:!selected { background: #383838; }
 QHeaderView::section { background: #353535; border: 0; border-right: 1px solid #1d1d1d; padding: 3px 6px; }
 QProgressBar { background: #3c3c3c; border: 0; max-height: 4px; min-height: 4px; }
 QProgressBar::chunk { background: #5b9bd5; }
+QProgressBar#bigbar { background: #3c3c3c; border: 1px solid #4a4a4a; border-radius: 4px; max-height: 999px;
+                      min-height: 0px; color: #ffffff; font-weight: bold; text-align: center; }
+QProgressBar#bigbar::chunk { background: #3f7fc0; border-radius: 3px; }
+QFrame#progpanel { background: #20262d; border-top: 2px solid #3f7fc0; }
+QLabel#progstep { color: #ffffff; font-weight: bold; }
+QLabel#progtime { color: #c8d3de; }
 QScrollBar:vertical { background: #2a2a2a; width: 10px; margin: 0; }
 QScrollBar::handle:vertical { background: #4a4a4a; min-height: 24px; }
 QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
@@ -1272,6 +1394,8 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("Model")
         m.addActions([self.a_models, self.a_presets])
         m = mb.addMenu("Trợ giúp")
+        m.addAction(self._act("Khuyến nghị theo card…", lambda: CardsDialog(self).exec()))
+        m.addAction(self._act("Đo tốc độ card…", self.bench_gpu))
         m.addAction(self._act("Giới thiệu", lambda: QMessageBox.about(
             self, APP_NAME, f"{APP_NAME} PC {__import__('net_anh').__version__}\nLàm nét, khôi phục ảnh chân dung "
                             "bằng AI chạy trên máy.\n\nĐơn giản (Ctrl+1): chọn loại ảnh, mức nét, bấm Làm nét.\n"
@@ -1422,6 +1546,36 @@ class MainWindow(QMainWindow):
         self.cb_restore = QCheckBox()
         self.cb_restore.setToolTip("Dò vết xước, nếp gãy, bụi rồi vá bằng LaMa; kéo lại màu phai; xoay ảnh nằm ngang. "
                                    "Tải thêm ~650 MB model ở lần đầu. Chậm hơn: nên có GPU NVIDIA.")
+        self.cb_ai_color = QCheckBox()
+        self.cb_ai_color.setToolTip("Dùng AI tô màu (DDColor) để đoán màu trang phục, cây cỏ: áo trắng ra trắng, jeans ra xanh. "
+                                    "Cần bật 'Nâng màu sặc sỡ cho cảnh'. Lần đầu tải thêm khoảng 912 MB; chậm hơn vài chục giây.")
+        self.cb_vivid = QCheckBox()
+        self.cb_vivid.setToolTip("Ảnh cũ chụp cảnh (nền không đồng màu, không phải ảnh đen trắng): nâng tông sặc sỡ hơn, da ít đổi. "
+                                 "Ảnh thẻ nền đồng màu và ảnh đen trắng được bỏ qua.")
+        # Đơn giản (loại Ảnh cũ): hai ô gọn, luôn cùng trạng thái với hai ô ở Chuyên sâu. Tắt mặc định, chỉ bật khi
+        # người dùng tích (hoặc preset bật); Tô màu AI hỏi trước khi tải DDColor 912 MB.
+        self.cb_vivid2 = QCheckBox("Nâng màu cảnh (ảnh cũ chụp cảnh)")
+        self.cb_vivid2.setToolTip(self.cb_vivid.toolTip())
+        self.cb_ai_color2 = QCheckBox("Tô màu AI cho cảnh (tải 912 MB lần đầu)")
+        self.cb_ai_color2.setToolTip(self.cb_ai_color.toolTip())
+        # Nguồn xử lý (sources.py): Trên máy này (mặc định) | Máy chủ GPU | API ngoài. Hai ô (Đơn giản, Chuyên sâu) cùng
+        # giá trị. Mở app luôn về Trên máy này: ảnh không rời máy nếu người dùng không chủ động chọn.
+        src_tip = ("Nơi xử lý ảnh. Trên máy này: ảnh không rời máy (mặc định). Máy chủ GPU: gửi tới máy chủ Beauty HDR của "
+                   "bạn (PC khác, GPU thuê). API ngoài: gửi tới fal.ai, Stability AI hoặc Replicate bằng khoá API của bạn "
+                   "(tính phí, app hỏi đồng ý trước mỗi lần gửi).")
+        self.src_box, self.src_box2 = QComboBox(), QComboBox()
+        for box in (self.src_box, self.src_box2):
+            for key, text in sources.SOURCES:
+                box.addItem(text, key)
+            box.setToolTip(src_tip)
+        self.api_engine = QComboBox()
+        self.api_engine.setToolTip("Dịch vụ ngoài dùng khi Nguồn xử lý là API ngoài (chỉ hiện dịch vụ đã có khoá)")
+        self.btn_src_cfg = QPushButton("Cài đặt…")
+        self.btn_src_cfg.setToolTip("Ghép nối máy chủ GPU, nhập khoá API ngoài")
+        self.src_note = QLabel()
+        self.src_note.setObjectName("muted")
+        self.src_note.setWordWrap(True)
+        self._api_ok: set[str] = set()  # dịch vụ người dùng đã cho phép không hỏi lại trong lần mở app này
         dmg_tip = ("Tô lên chỗ bị lá vàng, vết ố, rách che mất chi tiết. App vá chỗ đó (LaMa) rồi dựng lại mặt bị hỏng "
                    "(RestoreFormer++). Mặt nhỏ dưới ~60 px chỉ vá, không bịa thêm.")
         self.btn_damage = QPushButton("Vẽ vùng hỏng nặng…")
@@ -1499,6 +1653,9 @@ class MainWindow(QMainWindow):
         self.dev_note = QLabel()
         self.dev_note.setObjectName("muted")
         self.dev_note.setWordWrap(True)
+        self.btn_cards = QPushButton("Khuyến nghị theo card…")
+        self.btn_cards.setToolTip("Bảng kiểu số, cỡ ô cắt ảnh, model nên dùng và mức hỗ trợ cho từng dòng card")
+        self.btn_cards.clicked.connect(lambda: CardsDialog(self).exec())
         self.fmt = QComboBox()
         for t, e in (("JPG", ".jpg"), ("PNG", ".png"), ("WebP", ".webp")):
             self.fmt.addItem(t, e)
@@ -1560,6 +1717,8 @@ class MainWindow(QMainWindow):
         ol.setContentsMargins(10, 4, 10, 10)
         ol.setSpacing(6)
         ol.addWidget(self.btn_damage2, 0, Qt.AlignmentFlag.AlignLeft)
+        ol.addWidget(self.cb_vivid2)
+        ol.addWidget(self.cb_ai_color2)
         sl.addWidget(self.id_box)
         sl.addWidget(self.old_box)
         sl.addWidget(header_bar("Tuỳ chọn thêm"))
@@ -1573,6 +1732,13 @@ class MainWindow(QMainWindow):
         lr.addWidget(lab_look)
         lr.addWidget(self.look_box2, 1)
         ow.addLayout(lr)
+        sr = QHBoxLayout()
+        sr.setSpacing(6)
+        lab_src = QLabel("Xử lý ở")
+        lab_src.setObjectName("muted")
+        sr.addWidget(lab_src)
+        sr.addWidget(self.src_box2, 1)
+        ow.addLayout(sr)
         sl.addLayout(ow)
         sl.addWidget(header_bar("Mức làm nét"))
         pw = QVBoxLayout()
@@ -1691,6 +1857,8 @@ class MainWindow(QMainWindow):
         sec_detail.add("Khử nhiễu", self.sl_denoise, "nhieu hat")
         sec_detail.add("", self.cb_denoise_auto, "nhieu")
         sec_restore = Section("Khôi phục ảnh cũ", check=self.cb_restore, opened=False)
+        sec_restore.add("Nâng màu sặc sỡ cho cảnh", self.cb_vivid, "mau sac so canh tone ruc ro")
+        sec_restore.add("Tô màu AI cho cảnh (DDColor)", self.cb_ai_color, "to mau ai ddcolor trang phuc")
         sec_restore.add("", self.btn_damage, "vung hong la vang rach xuoc bui phai xoay cu")
         sec_bg = Section("Đổi nền", check=self.cb_bg, opened=False)
         swr = QWidget()
@@ -1702,8 +1870,18 @@ class MainWindow(QMainWindow):
         swl.addStretch()
         sec_bg.add("Màu nền", swr, "nen anh the xanh trang do")
         sec_out = Section("Xuất và thiết bị", opened=False)
+        srw = QWidget()
+        srl = QHBoxLayout(srw)
+        srl.setContentsMargins(0, 0, 0, 0)
+        srl.setSpacing(6)
+        srl.addWidget(self.src_box, 1)
+        srl.addWidget(self.btn_src_cfg)
+        sec_out.add("Nguồn xử lý", srw, "nguon xu ly may chu gpu api ngoai fal stability replicate online")
+        sec_out.add("Dịch vụ", self.api_engine, "api ngoai fal stability replicate")
+        sec_out.add("", self.src_note, "nguon xu ly may chu api")
         sec_out.add("Thiết bị", self.device, "gpu cpu card thiết bị render")
         sec_out.add("", self.dev_note, "gpu cpu card thiết bị render")
+        sec_out.add("", self.btn_cards, "gpu card khuyen nghi rtx gtx vram")
         sec_out.add("Định dạng", self.fmt, "jpg png webp")
         sec_out.add("Chất lượng", self.quality, "jpg")
         sec_out.add("Cỡ ảnh ra", self.out_size, "1k 2k 4k")
@@ -1839,7 +2017,13 @@ class MainWindow(QMainWindow):
         for i in range(3):
             self.splitter.setCollapsible(i, i == 0)
         self.splitter.setSizes([round(260 * fk), 820, round(380 * fk)])
-        self.setCentralWidget(self.splitter)
+        central = QWidget()
+        cl = QVBoxLayout(central)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(0)
+        cl.addWidget(self.splitter, 1)
+        cl.addWidget(self._build_progress_panel())
+        self.setCentralWidget(central)
 
         # --- nhật ký (Xem → Nhật ký), thanh trạng thái
         self.log = QPlainTextEdit()
@@ -1866,25 +2050,16 @@ class MainWindow(QMainWindow):
         self.status_lbl = QLabel()
         self.status_lbl.setMinimumWidth(10)
         sb.addWidget(self.status_lbl, 1)
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setFixedWidth(round(300 * QApplication.font().pointSizeF() / 9.0))
-        self.progress.setTextVisible(True)
-        self.progress.setFixedHeight(round(20 * QApplication.font().pointSizeF() / 9.0))
-        self.progress.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.progress.hide()
         self.track = ProgressTrack()
         self._tick = QTimer(self)
         self._tick.setInterval(1000)
         self._tick.timeout.connect(self._show_progress)
         self.btn_cancel = QPushButton("Huỷ")
-        self.btn_cancel.setObjectName("lnk")
         self.btn_cancel.clicked.connect(self.cancel)
         self.btn_cancel.hide()
         self.dev_lbl = QLabel()
         self.dev_lbl.setToolTip("Máy: " + self.hw_text)
-        sb.addPermanentWidget(self.progress)
-        sb.addPermanentWidget(self.btn_cancel)
+        self.prog_panel.layout().addWidget(self.btn_cancel)
         sb.addPermanentWidget(self.dev_lbl)
         self._lock_widgets = [sp, sw, pt, ht, self.btn_reset_adj, self.btn_restore]
         self._lock_actions = [self.a_reset, self.a_damage, self.a_presets]
@@ -1926,6 +2101,16 @@ class MainWindow(QMainWindow):
         self.cb_detail_same.toggled.connect(lambda on: (self.sl_detail.setEnabled(not on), self._to_custom()))
         self.cb_lowlight.toggled.connect(self._to_custom)
         self.cb_restore.toggled.connect(self._to_custom)
+        self.cb_vivid.toggled.connect(self._to_custom)
+        self.cb_ai_color.toggled.connect(self._to_custom)
+        for cb in (self.cb_vivid, self.cb_vivid2):
+            cb.toggled.connect(self._vivid_toggled)
+        for cb in (self.cb_ai_color, self.cb_ai_color2):
+            cb.toggled.connect(self._ai_color_toggled)
+        for box in (self.src_box, self.src_box2):
+            box.currentIndexChanged.connect(lambda _=0, b=box: self._source_changed(b))
+        self.btn_src_cfg.clicked.connect(lambda: self._source_settings())
+        self._source_changed(self.src_box)
         self.btn_damage.clicked.connect(self._draw_damage)
         self.btn_damage2.clicked.connect(self._draw_damage)
         self.cb_keep_lips.toggled.connect(self._to_custom)
@@ -2046,6 +2231,10 @@ class MainWindow(QMainWindow):
     def _simple_apply(self):
         kind, power = self.simple_kind, self.simple_power
         n = None if power == "auto" else int(power)
+        # đổi mức nét trong cùng loại Ảnh cũ: giữ hai ô Nâng màu cảnh / Tô màu AI người dùng đã tích
+        keep_scene = (kind == "old" and getattr(self, "_scene_kind", None) == "old",
+                      self.cb_vivid.isChecked(), self.cb_ai_color.isChecked())
+        self._scene_kind = kind
         if n is None:
             key = KIND_PRESET[kind]
             self.preset.blockSignals(True)
@@ -2067,6 +2256,13 @@ class MainWindow(QMainWindow):
             self.mode.setCurrentIndex(self.mode.findData("upscale"))
         for w in boxes:
             w.blockSignals(False)
+        if keep_scene[0]:
+            for pair_, on in (((self.cb_vivid, self.cb_vivid2), keep_scene[1]),
+                              ((self.cb_ai_color, self.cb_ai_color2), keep_scene[2])):
+                for cb in pair_:
+                    cb.blockSignals(True)
+                    cb.setChecked(on)
+                    cb.blockSignals(False)
         self._set_bg_color(self.bg_color)
         self._mode_changed(update_custom=False)
         self._update_hw_warn()
@@ -2134,7 +2330,7 @@ class MainWindow(QMainWindow):
             self.preset_lib.set_active(got[0].id)
         self._fill_preset_sets()
         self._fill_looks()
-        msg = "Đã nạp và chọn: " + ", ".join(st.name for st in got)
+        msg = ("Đã nạp và chọn: " + ", ".join(st.name for st in got)) if got else "Không có bộ mới để nạp."
         if warn:
             msg += "\n\nĐã tự sửa:\n" + "\n".join(warn[:12])
         QMessageBox.information(self, APP_NAME, msg)
@@ -2270,9 +2466,86 @@ class MainWindow(QMainWindow):
         self._set_deshine(self.sl_deshine.value() if on else 0.0)
         self.say("Khử bóng loáng da: " + (f"bật ({self.sl_deshine.value() * 100:.0f} %)" if on else "tắt"))
 
+    def _set_pair(self, boxes, on: bool):
+        for cb in boxes:
+            cb.blockSignals(True)
+            cb.setChecked(on)
+            cb.blockSignals(False)
+
+    def _vivid_toggled(self, on: bool):
+        """Nâng màu cảnh (hai ô cùng trạng thái). Tắt thì Tô màu AI cũng tắt (Tô màu AI chạy trên bước nâng màu cảnh)."""
+        self._set_pair((self.cb_vivid, self.cb_vivid2), on)
+        if not on:
+            self._set_pair((self.cb_ai_color, self.cb_ai_color2), False)
+        self.say("Nâng màu cảnh ảnh cũ: " + ("bật" if on else "tắt"))
+
+    def _ai_color_toggled(self, on: bool):
+        """Tô màu AI (DDColor): hỏi trước khi tải 912 MB; bật thì tự bật Nâng màu cảnh."""
+        if on and not ask_ddcolor(self):
+            on = False
+        self._set_pair((self.cb_ai_color, self.cb_ai_color2), on)
+        if on:
+            self._set_pair((self.cb_vivid, self.cb_vivid2), True)
+        self.say("Tô màu AI cho cảnh: " + ("bật (DDColor)" if on else "tắt"))
+
+    # ----- nguồn xử lý -----
+
+    def _source(self) -> str:
+        return self.src_box.currentData() or "local"
+
+    def _fill_api_engines(self) -> dict:
+        cfg = providers.load_config()
+        engs = providers.engines(cfg)
+        keep = self.api_engine.currentData()
+        self.api_engine.blockSignals(True)
+        self.api_engine.clear()
+        for e in engs.values():
+            self.api_engine.addItem(f"{e.label} · {e.price}", e.id)
+        if keep:
+            self.api_engine.setCurrentIndex(max(0, self.api_engine.findData(keep)))
+        self.api_engine.blockSignals(False)
+        self._api_guard = providers.guard_threshold(cfg)
+        return engs
+
+    def _source_changed(self, box):
+        key = box.currentData() or "local"
+        for b in (self.src_box, self.src_box2):
+            if b is not box:
+                b.blockSignals(True)
+                b.setCurrentIndex(b.findData(key))
+                b.blockSignals(False)
+        engs = self._fill_api_engines()
+        self.api_engine.setVisible(key == "api")
+        remote = sources.load_remote()
+        if key == "server" and not remote.get("token"):
+            note = "Chưa ghép nối máy chủ GPU. Bấm Cài đặt… để nhập địa chỉ và mã 6 số."
+        elif key == "server":
+            note = f"Gửi ảnh tới máy chủ {remote.get('name') or remote.get('url')} ({remote.get('device') or '?'})."
+        elif key == "api" and not engs:
+            note = "Chưa có khoá API ngoài nào. Bấm Cài đặt… để nhập khoá."
+        elif key == "api":
+            note = ("⚠ Ảnh gửi ra dịch vụ ngoài, có tính phí, app hỏi trước mỗi lần. Chỉ làm nét/phóng to: khử bóng da, "
+                    "tông mẫu, đổi nền, khôi phục ảnh cũ không áp dụng.")
+        else:
+            note = ""
+        self.src_note.setText(note)
+        self.src_note.setVisible(bool(note))
+        if hasattr(self, "simple_eta") and key != "local":
+            self.simple_eta.setText("Xử lý ở " + box.currentText())
+        elif hasattr(self, "simple_eta"):
+            self._update_hw_warn()
+        if box.hasFocus() or box.view().isVisible():
+            self.say("Nguồn xử lý: " + box.currentText())
+            if (key == "server" and not remote.get("token")) or (key == "api" and not engs):
+                QTimer.singleShot(0, lambda: self._source_settings("api" if key == "api" else "server"))
+
+    def _source_settings(self, tab: str | None = None):
+        SourceDialog(self, tab or ("api" if self._source() == "api" else "server")).exec()
+        self._source_changed(self.src_box)
+
     def _apply_settings(self, s: Settings):
         widgets = (self.mode, self.preset, self.scale, self.cb_denoise_auto, self.cb_lowlight, self.face_model,
-                   self.bg_model, self.cb_detail_same, self.cb_keep_lips, self.subject, self.cb_restore)
+                   self.bg_model, self.cb_detail_same, self.cb_keep_lips, self.subject, self.cb_restore, self.cb_vivid, self.cb_ai_color)
         for w in widgets:
             w.blockSignals(True)
         self.mode.setCurrentIndex(self.mode.findData(s.mode))
@@ -2288,6 +2561,14 @@ class MainWindow(QMainWindow):
         self.sl_tone.set(s.tone)
         self.cb_lowlight.setChecked(s.low_light)
         self.cb_restore.setChecked(s.repair > 0 or s.fade > 0 or s.auto_rotate)
+        for cb in (self.cb_vivid, self.cb_vivid2):
+            cb.blockSignals(True)
+            cb.setChecked(s.scene_vivid > 0)
+            cb.blockSignals(False)
+        for cb in (self.cb_ai_color, self.cb_ai_color2):
+            cb.blockSignals(True)
+            cb.setChecked(s.scene_ai > 0 and s.scene_vivid > 0)
+            cb.blockSignals(False)
         self.sl_fid.set(s.fidelity)
         self.cb_detail_same.setChecked(s.detail_fidelity is None)
         self.sl_detail.set(s.fidelity if s.detail_fidelity is None else s.detail_fidelity)
@@ -2325,7 +2606,8 @@ class MainWindow(QMainWindow):
                         face_styles=facestyle.styles_to_settings(self.preset_lib.get(self.preset_set.currentData())),
                         repair=1.0 if self.cb_restore.isChecked() else 0.0,
                         fade=1.0 if self.cb_restore.isChecked() else 0.0, auto_rotate=self.cb_restore.isChecked(),
-                        damage_mask=self.damage_path)
+                        damage_mask=self.damage_path, scene_vivid=1.0 if self.cb_vivid.isChecked() else 0.0,
+                        scene_ai=1.0 if self.cb_ai_color.isChecked() else 0.0)
 
     def _draw_damage(self):
         if self.src_img is None:
@@ -2428,13 +2710,14 @@ class MainWindow(QMainWindow):
 
     def _fill_devices(self):
         """Tự động / GPU / CPU. GPU không dùng được (không có, hoặc bản cài chỉ có CPU) vẫn hiện nhưng xám, kèm lý do."""
-        gpu = next((d for d in self._devices if d.kind != "cpu"), None)
+        gpu = next(iter(best_first([d for d in self._devices if d.kind != "cpu"])), None)
         cpu = self._devices[-1]
         self.device.blockSignals(True)
         self.device.clear()
         self.device.addItem("Tự động (có GPU thì dùng GPU)", "auto")
         if gpu is not None:
             self.device.addItem(gpu.name + ("" if gpu.half else ", fp32"), "gpu")
+            self.device.setItemData(1, profile_text(gpu), Qt.ItemDataRole.ToolTipRole)
             self._gpu_reason = ""
         else:
             unused = hardware.machine().unused_gpu
@@ -2453,9 +2736,12 @@ class MainWindow(QMainWindow):
 
     def _device_changed(self, *_):
         want = self.device.currentData()
-        gpu = next((d for d in self._devices if d.kind != "cpu"), None)
+        gpu = next(iter(best_first([d for d in self._devices if d.kind != "cpu"])), None)
         use = gpu if (want != "cpu" and gpu is not None) else self._devices[-1]
         txt = "Đang dùng: " + use.name
+        if use.kind != "cpu":
+            eng = self._engine if self._engine is not None and self._engine.dev.device == use.device else None
+            txt += ". " + profile_text(use, eng)
         if use.kind == "cpu" and want == "cpu" and gpu is not None:
             txt += " (bạn chọn CPU)"
         elif use.kind == "cpu" and self._gpu_reason:
@@ -2559,6 +2845,8 @@ class MainWindow(QMainWindow):
 
     def say(self, msg: str):
         self.log.appendPlainText(msg)
+        if re.match(r".+:\s*\d+%$", msg.strip()):  # "Real-ESRGAN: 16%": đã hiện ở khu tiến độ, khỏi lặp ở thanh trạng thái
+            return
         self.status_lbl.setText(msg.splitlines()[0] if msg else "")
 
     def _busy(self) -> bool:
@@ -2594,7 +2882,7 @@ class MainWindow(QMainWindow):
         self.a_undo.setEnabled(not busy and len(self.results) > 1)
         for w in (self.btn_restore, self.a_restore):
             w.setEnabled(not busy and has_res)
-        self.progress.setVisible(busy)
+        self.prog_panel.setVisible(busy)
         if not busy and getattr(self, "status_lbl", None) is not None and self.status_lbl.text().startswith("⚠"):
             self.status_lbl.setStyleSheet("")
 
@@ -2608,6 +2896,7 @@ class MainWindow(QMainWindow):
 
     def invalidate_engine(self):
         self._engine = None
+        self._side = None
 
     def _start(self, fn, on_done, label: str):
         job = Job(fn)
@@ -2621,6 +2910,7 @@ class MainWindow(QMainWindow):
         job.failed.connect(self._failed)
         job.cancelled.connect(lambda: self.say(f"Đã huỷ: {label}. Ảnh gốc và kết quả trước vẫn giữ nguyên."))
         job.finished.connect(self._update_buttons)
+        job.finished.connect(self._device_changed)  # ô Thiết bị: ghi kiểu số đã chạy thử sau lần chạy đầu
         job.start()
         self._tick.start()
         self._show_progress()
@@ -2631,10 +2921,58 @@ class MainWindow(QMainWindow):
         eng.cancel_requested = lambda: job.stop
         return eng
 
+    def _side_engine(self, job: Job) -> Enhancer:
+        """Engine thứ hai khi làm thư mục song song: cùng thiết bị, giữ lại cho các lô sau (model khỏi nạp lại).
+        Không đẩy dòng phần trăm lên thanh tiến độ (hai ảnh chạy cùng lúc sẽ làm thanh nhảy loạn)."""
+        side = getattr(self, "_side", None)
+        if side is None or side.dev.device != self._engine.dev.device:
+            side = self._side = Enhancer(self.device.currentData())
+        side.say = lambda m: None if m.rstrip().endswith("%") else job.message.emit(m)
+        side.cancel_requested = lambda: job.stop
+        return side
+
     def cancel(self):
         if self._busy():
             self.job.stop = True
             self.say("Đang huỷ…")
+
+    def _build_progress_panel(self) -> QFrame:
+        """Khu tiến độ riêng ở đáy vùng ảnh (không nằm trong thanh trạng thái): tên bước đang làm, thanh % to có chữ,
+        thời gian đã chạy và còn lại, nút Huỷ. Cỡ theo cỡ chữ hệ thống (fontMetrics) nên không bị cắt ở DPI cao hay cửa
+        sổ hẹp: tên bước tự rút gọn (…) khi thiếu chỗ, chữ đầy đủ xem ở tooltip."""
+        fm = QApplication.fontMetrics()
+        panel = QFrame()
+        panel.setObjectName("progpanel")
+        lay = QHBoxLayout(panel)
+        pad = max(6, fm.height() // 2)
+        lay.setContentsMargins(pad * 2, pad, pad * 2, pad)
+        lay.setSpacing(pad * 2)
+        self.prog_step = QLabel("Chuẩn bị")
+        self.prog_step.setObjectName("progstep")
+        self.prog_step.setMinimumWidth(fm.horizontalAdvance("Làm nét nền 100%") + pad)
+        self.prog_step.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.progress = QProgressBar()
+        self.progress.setObjectName("bigbar")
+        self.progress.setRange(0, 100)
+        self.progress.setTextVisible(True)
+        self.progress.setFormat("%p%")
+        self.progress.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.progress.setFixedHeight(round(fm.height() * 1.7))
+        self.progress.setMinimumWidth(fm.horizontalAdvance("0") * 16)
+        self.prog_time = QLabel("")
+        self.prog_time.setObjectName("progtime")
+        self.prog_time.setMinimumWidth(fm.horizontalAdvance("Đã chạy 00:00 · còn khoảng 00:00") + pad)
+        lay.addWidget(self.prog_step, 3)
+        lay.addWidget(self.progress, 4)
+        lay.addWidget(self.prog_time, 0)
+        panel.setVisible(False)
+        self.prog_panel = panel
+        return panel
+
+    def _set_step_text(self, text: str) -> None:
+        w = max(40, self.prog_step.width())
+        self.prog_step.setText(self.prog_step.fontMetrics().elidedText(text, Qt.TextElideMode.ElideRight, w))
+        self.prog_step.setToolTip(text)
 
     def _job_msg(self, msg: str):
         self.track.feed(msg)
@@ -2645,7 +2983,10 @@ class MainWindow(QMainWindow):
             return
         t = self.track
         self.progress.setValue(t.pct)
-        self.progress.setFormat(t.bar_text())
+        self.progress.setFormat(f"{t.pct}%")
+        self.progress.setToolTip(t.bar_text())
+        self._set_step_text(t.step)
+        self.prog_time.setText(t.time_text())
         for b in (self.btn_run, self.btn_run_simple):
             b.setText(f"Huỷ · {t.pct}%")
         warn = t.warning()
@@ -2746,6 +3087,11 @@ class MainWindow(QMainWindow):
     def run_single(self):
         if self.src_img is None or self._busy():
             return
+        src = self._source()
+        if src == "server":
+            return self._run_on_server()
+        if src == "api":
+            return self._run_on_api()
         s = self.settings()
         missing = [m for m in models_needed(s) if weights.status(m) != "ready"]
         if missing:
@@ -2763,9 +3109,95 @@ class MainWindow(QMainWindow):
 
         self._start(work, self._finished, "xử lý ảnh")
 
+    def _run_on_server(self):
+        """Nguồn xử lý Máy chủ GPU: gửi ảnh + đủ bộ thông số lên máy chủ Beauty HDR đã ghép nối."""
+        cfg = sources.load_remote()
+        if not cfg.get("token"):
+            self._source_settings("server")
+            cfg = sources.load_remote()
+            if not cfg.get("token"):
+                return
+        if not consent_server(self, cfg):
+            self.say("Không gửi ảnh. Chọn Xử lý ở: Trên máy này để làm nét bằng máy này.")
+            return
+        s = self.settings()
+        url, token = cfg["url"], cfg["token"]
+        img = self.src_img
+        level = self.level_choice or (self.level_group.checkedId() if self.level_group.checkedId() > 0 else "auto")
+        self._eta_s = 0.0
+        self.say(f"Bắt đầu trên máy chủ {cfg.get('name') or url}: {MODES.get(s.mode, s.mode)}, {self._scale_text(s)}")
+
+        def work(job: Job):
+            info = sources.server_info(url)
+            feats = info.get("features") or []
+            lost = sources.lost_on_old_server(s, feats)
+            if lost:
+                job.message.emit("⚠ Máy chủ bản cũ bỏ qua: " + ", ".join(lost) + " (cập nhật máy chủ lên 0.16.0)")
+            try:
+                res, rep_d = sources.run_on_server(url, token, img, sources.server_params(s, level, feats),
+                                                   job.message.emit, lambda: job.stop)
+            except providers.ProviderCancelled:
+                raise Cancelled()
+            except sources.SourceError as e:
+                if e.code in ("unauthorized", "http_401"):
+                    raise RuntimeError("Máy chủ không nhận mã kết nối nữa: ghép nối lại ở Nguồn xử lý → Cài đặt…")
+                raise RuntimeError(str(e))
+            return res, sources.report_from_server(rep_d, url), s
+
+        self._start(work, self._finished, "xử lý ảnh")
+
+    def _run_on_api(self):
+        """Nguồn xử lý API ngoài: hỏi đồng ý, gửi ảnh, kiểm giữ mặt trên máy này; lỗi/đổi mặt → làm bằng máy này."""
+        engs = self._fill_api_engines()
+        e = engs.get(self.api_engine.currentData() or "")
+        if e is None:
+            self._source_settings("api")
+            engs = self._fill_api_engines()
+            e = engs.get(self.api_engine.currentData() or "")
+            if e is None:
+                return
+        if not consent_api(self, e, self._api_ok):
+            self.say("Không gửi ảnh. Chọn Xử lý ở: Trên máy này để làm nét bằng máy này.")
+            return
+        s = self.settings()
+        img = self.src_img
+        guard = getattr(self, "_api_guard", providers.GUARD_IDS)
+        self._eta_s = 0.0
+        self.say(f"Bắt đầu: gửi ảnh tới {e.label} ({e.price})")
+
+        def work(job: Job):
+            eng = self._engine_for(job)
+            t0 = time.perf_counter()
+            try:
+                r = sources.run_api(eng, e, img, s.upscale, job.message.emit, lambda: job.stop, guard)
+            except providers.ProviderCancelled:
+                raise Cancelled()
+            if r.used_api:
+                return r.img, sources.report_from_api(e, r, round(time.perf_counter() - t0, 2)), s
+            job.message.emit("⚠ " + r.note)
+            res, rep = eng.process(img, s)
+            rep.notes.insert(0, r.note)
+            return res, rep, s
+
+        self._start(work, self._finished, "xử lý ảnh")
+
+    def _gpu_warning(self, rep) -> str:
+        """Đã chọn GPU (hoặc Tự động trên máy có GPU dùng được) mà ảnh chạy bằng CPU: lý do rõ ràng thay vì im lặng."""
+        want = self.device.currentData()
+        has_gpu = any(d.kind != "cpu" for d in getattr(self, "_devices", []))
+        if rep.device_kind != "cpu" or want == "cpu" or not has_gpu:  # "remote"/"external": không chạy ở máy này
+            return ""
+        why = next((n for n in rep.notes if n.startswith("GPU lỗi")), "")
+        return ("⚠ Đã chọn GPU nhưng ảnh này chạy bằng CPU (chậm hơn nhiều)"
+                + (f": {why}" if why else ". Mở lại app để thử lại GPU; nếu vẫn vậy, gửi dòng này và ô Thiết bị cho người phát triển."))
+
     def _finished(self, payload):
         res, rep, s = payload
+        warn = self._gpu_warning(rep)
         self.say(rep.summary())
+        if warn:  # sau tóm tắt để là dòng cuối, nổi trên thanh trạng thái
+            self._device_changed()
+            self.say(warn)
         self.results.append((res, s, rep.mode, rep.seconds))
         self._models_used[id(res)] = rep.models()
         self.view.after_label = rep.models()
@@ -2845,6 +3277,8 @@ class MainWindow(QMainWindow):
         if not files:
             QMessageBox.information(self, APP_NAME, "Thư mục không có ảnh.")
             return
+        if self._source() != "local":
+            self.say("Làm cả thư mục luôn chạy trên máy này (Máy chủ GPU / API ngoài hiện chỉ dùng cho từng ảnh).")
         dst = QFileDialog.getExistingDirectory(self, "Chọn thư mục lưu kết quả")
         if not dst:
             return
@@ -2857,15 +3291,24 @@ class MainWindow(QMainWindow):
 
         def work(job: Job):
             eng = self._engine_for(job)
-            ok = 0
+            n_workers = batch_workers_for(eng)
+            engines = extra_engines(eng, n_workers, lambda: self._side_engine(job))
+            if n_workers > 1:
+                job.message.emit(f"GPU nhiều bộ nhớ: xử lý {n_workers} ảnh song song (mỗi luồng nạp model một lần)")
+            ok = [0]
             tally = BatchTally(len(files))
-            for i, f in enumerate(files, 1):
-                eng._check()
+            runner = BatchRunner(engines, load_image, stop_errors=(Cancelled, InterruptedError))
+            reserved: set = set()
+
+            def one(e: Enhancer, lo):
+                f = lo.item
+                i = lo.index + 1
+                e._check()
                 job.message.emit(f"[{i}/{len(files)}] {f.name}")
                 try:
-                    img = load_image(f)
+                    img = lo.get()
                     if level or auto:
-                        an = eng.analyze(img, with_faces=eng.models_ready())
+                        an = e.analyze(img, with_faces=e.models_ready())
                         base = Settings(upscale=s.upscale, face_model=s.face_model, sr_model=s.sr_model,
                                         phone=s.phone, wb=s.wb, skin_tone=s.skin_tone, subject=s.subject,
                                         face_styles=s.face_styles, keep_lips=s.keep_lips, bg_color=s.bg_color,
@@ -2877,26 +3320,74 @@ class MainWindow(QMainWindow):
                         si = s
                     if self.phone.currentData() == "auto":  # mỗi ảnh một hãng, thông số màu theo hãng đó
                         si = si.with_(phone=detect_phone(f)[0], wb=-1.0, skin_tone=-1.0)
-                    res, rep = eng.process(img, si)
+                    res, rep = e.process(img, si)
                     job.message.emit(f"   {rep.models()}")
-                    out = save_image(resize_long(res, long_side), unique_output_path(f, Path(dst), ext), q)
-                    self.history.add(f, out, res, rep.mode, {**si.to_dict(), "models_used": rep.models()}, rep.seconds)
-                    job.message.emit(f"   → {out.name} · {rep.seconds:.1f} s")
-                    ok += 1
-                    tally.add(rep, f.name)
-                    if rep.ai_fallback:
-                        job.message.emit("   ⚠ AI lỗi, ảnh này chỉ qua xử lý nhanh")
-                except ImageError as e:
-                    tally.fail()
-                    job.message.emit(f"   bỏ qua: {e}")
+                    warn = self._gpu_warning(rep)
+                    if warn:
+                        job.message.emit("   " + warn)
+                    with runner.lock:  # giữ tên file ra: ảnh trước có thể chưa ghi xong
+                        dst_path = unique_output_path(f, Path(dst), ext)
+                        k = 2
+                        while dst_path in reserved:
+                            dst_path = dst_path.with_name(f"{dst_path.stem}_{k}{dst_path.suffix}")
+                            k += 1
+                        reserved.add(dst_path)
+
+                    def save(res=res, rep=rep, si=si, f=f, dst_path=dst_path):
+                        try:
+                            out = save_image(resize_long(res, long_side), dst_path, q)
+                            with runner.lock:
+                                self.history.add(f, out, res, rep.mode, {**si.to_dict(), "models_used": rep.models()},
+                                                 rep.seconds)
+                                ok[0] += 1
+                                tally.add(rep, f.name)
+                            job.message.emit(f"   → {out.name} · {rep.seconds:.1f} s")
+                            if rep.ai_fallback:
+                                job.message.emit("   ⚠ AI lỗi, ảnh này chỉ qua xử lý nhanh")
+                        except Exception as ex:  # ổ đầy, không ghi được: báo, làm tiếp ảnh khác
+                            with runner.lock:
+                                tally.fail()
+                            job.message.emit(f"   LỖI ghi {f.name}: {ex.__class__.__name__}: {ex}")
+
+                    runner.later(save)
+                except ImageError as ex:
+                    with runner.lock:
+                        tally.fail()
+                    job.message.emit(f"   bỏ qua: {ex}")
                 except (Cancelled, InterruptedError):
                     raise
-                except Exception as e:  # một ảnh lỗi (hết RAM, ổ đầy, không ghi được…) không dừng cả thư mục
-                    tally.fail()
-                    job.message.emit(f"   LỖI: {e.__class__.__name__}: {e}")
-            return ok, len(files), tally
+                except Exception as ex:  # một ảnh lỗi (hết RAM, ổ đầy, không ghi được…) không dừng cả thư mục
+                    with runner.lock:
+                        tally.fail()
+                    job.message.emit(f"   LỖI: {ex.__class__.__name__}: {ex}")
+
+            runner.run(files, one)
+            return ok[0], len(files), tally
 
         self._start(work, lambda r: self._batch_done(r), "xử lý thư mục")
+
+    def bench_gpu(self):
+        """Đo tốc độ, độ chính xác từng kiểu số trên card này (gpu_bench), ghi file .txt để gửi người phát triển."""
+        if self._busy():
+            return
+        if QMessageBox.question(self, APP_NAME, "Đo tốc độ card: chạy thử các model nền ở fp32 / fp16 / bf16 và cả quy "
+                                "trình làm nét, mất khoảng 1–5 phút trên GPU (CPU lâu hơn). Kết quả ghi ra file .txt "
+                                "ngoài Desktop. Bắt đầu?") != QMessageBox.StandardButton.Yes:
+            return
+        from .gpu_bench import run as bench_run
+
+        dev = self.device.currentData()
+        self.invalidate_engine()  # bench nạp model riêng: nhả bộ nhớ GPU của engine đang giữ
+
+        def work(job: Job):
+            return bench_run(job.message.emit, device=dev)
+
+        def done(path):
+            self.say(f"Đã đo xong: {path}")
+            QMessageBox.information(self, APP_NAME, f"Đã ghi kết quả đo vào:\n{path}\n\nGửi file này để tinh chỉnh app "
+                                    "cho dòng card của bạn.")
+
+        self._start(work, done, "đo tốc độ card")
 
     def _batch_done(self, r):
         self.say("Xong thư mục: " + r[2].summary())

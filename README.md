@@ -128,7 +128,10 @@ net_anh/
   classic.py    khử nhiễu theo mức nhiễu, Retinex, CLAHE, unsharp, frequency separation
   history.py    lịch sử SQLite + thumbnail
   weights.py    manifest model, tải, SHA-256, thử lại
-  device.py     CUDA / DirectML / Metal / CPU
+  device.py     CUDA / XPU / DirectML / Metal / CPU, bỏ card mà bản PyTorch không chạy được
+  gpu_profile.py dòng card, kiểu số có chạy thử, cắt ô theo VRAM, bảng khuyến nghị
+  batch.py      làm thư mục: đọc trước, ghi luồng riêng, 2 ảnh song song trên GPU lớn
+  gpu_bench.py  đo tốc độ card (--do-gpu)
   identity.py   ArcFace để đo IDS
   gui.py, cli.py
   server.py     máy chủ cho app điện thoại: HTTP API v1, mã ghép nối, hàng đợi một GPU, tìm máy qua UDP
@@ -152,6 +155,128 @@ Sửa ám vàng, đỏ của ảnh điện thoại và bộ lọc theo hãng (đ
 App Android bật **Chất lượng cao nhất** thì gửi ảnh tới PC này để xử lý bằng model nặng nhất trên GPU, máy chủ không
 có thì điện thoại tự xử lý trên máy. Mở **Beauty HDR - Máy chủ cho điện thoại** (menu Start), `may_chu.bat` hoặc
 `python -m net_anh.server`. Cài đặt, ghép nối, dùng ở ngoài qua Tailscale, API: [docs/MAY_CHU.md](docs/MAY_CHU.md).
+
+## Thay đổi ở 0.16.1
+
+- Gộp 0.15.2 (Đổi nền làm lại mặt nạ, 4 bộ preset ảnh thẻ có sẵn) vào 0.16.0 (Nguồn xử lý, API ngoài, màu cảnh ở Đơn giản).
+
+## Thay đổi ở 0.16.0 (cổng kết nối API xử lý ảnh ngoài, nguồn xử lý trên PC)
+
+- Chế độ Đơn giản, loại Ảnh cũ: hai ô gọn **Nâng màu cảnh** và **Tô màu AI cho cảnh** (DDColor), cùng trạng thái với
+  hai ô ở Chuyên sâu → Khôi phục ảnh cũ. Tắt mặc định (chỉ bật khi người dùng tích hoặc preset bật); đổi mức nét trong
+  cùng loại Ảnh cũ thì giữ nguyên. Tô màu AI hỏi trước khi tải 912 MB; bật Tô màu AI tự bật Nâng màu cảnh, tắt Nâng màu
+  cảnh thì Tô màu AI cũng tắt. Khử bóng loáng da đã có ở Đơn giản từ 0.13.
+- **Nguồn xử lý** (Đơn giản: Tuỳ chọn thêm → Xử lý ở; Chuyên sâu: Xuất và thiết bị): Trên máy này (mặc định, mở app luôn
+  về đây) | Máy chủ GPU | API ngoài. Mã: `net_anh/sources.py`, hộp thoại `net_anh/gui_sources.py`.
+  - Máy chủ GPU: ghép nối mã 6 số với một máy chủ Beauty HDR (PC khác, GPU thuê), gửi ảnh qua API v1 kèm đủ bộ thông
+    số (`settings=<JSON>`, tính năng mới `settings` của máy chủ, kiểm từng trường bằng `Settings.from_dict`). Máy chủ cũ
+    chỉ nhận mức nét và vài tuỳ chọn, app báo phần bị bỏ qua. Lần đầu với mỗi địa chỉ hỏi đồng ý gửi ảnh.
+  - API ngoài: khoá do người dùng nhập (Cài đặt… → API ngoài, lưu `~/.net_anh/providers.json` trên máy này). Hỏi đồng ý
+    trước mỗi lần gửi (cảnh báo riêng tư, giá; "không hỏi lại" chỉ đến khi đóng app), bỏ EXIF, kiểm giữ mặt ArcFace trên
+    máy này; API lỗi hoặc đổi mặt thì tự làm lại bằng máy này và ghi lý do.
+  - Làm cả thư mục vẫn chạy trên máy này.
+
+- Máy chủ cho điện thoại nhận thêm nguồn xử lý ngoài: fal.ai Clarity, Stability AI Upscale (Conservative, Fast),
+  Replicate (model tự chọn). Khoá API chỉ đặt trên máy chủ (biến môi trường hoặc `~/.net_anh/providers.json`), app chọn
+  bằng `engine=<id>` và phải gửi `consent=1` sau khi hỏi người dùng.
+- Kết quả từ API ngoài được kiểm giữ khuôn mặt bằng ArcFace; mặt bị đổi (IDS < 0,70) hoặc API lỗi, hết credit thì máy
+  chủ tự xử lý bằng pipeline của máy này và ghi lý do vào báo cáo. Ảnh gửi đi bỏ sạch EXIF.
+- Thử nhanh không cần máy chủ: `python -m net_anh.providers anh.jpg --engine fal-clarity`. Chi tiết:
+  [docs/API_NGOAI.md](docs/API_NGOAI.md).
+
+## Thay đổi ở 0.15.2
+
+- **Đổi nền làm lại mặt nạ** (`net_anh/backdrop.py`): trước đây mặt nạ gần như nhị phân ở độ phân giải ảnh đã phóng
+  (99,4 % điểm chỉ 0 hoặc 1) nên viền tóc, tay áo răng cưa, mất sợi tóc, còn viền sẫm và đốm trắng. Giờ: dải chuyển có
+  bề rộng tính theo kích thước ảnh (±0,5 % cạnh dài) ở mọi độ phân giải; alpha ở dải này tính theo phép chiếu màu
+  (điểm = α·người + (1−α)·nền, nền đã biết) rồi lọc dẫn hướng theo ảnh nên mép mềm đúng chỗ, không còn kéo giãn mạnh
+  làm mất tóc mảnh; gỡ ám nền ở viền bằng màu người sạch lan từ vùng đặc gần nhất; bụi rời trên phông vẫn bỏ nhưng
+  sợi tóc sát người được giữ. Áo gần màu phông nhưng có biên rõ giờ vẫn là người (cắt vùng nền ở cạnh rõ rồi nhận lại
+  mảnh nền đúng màu), trước đây cả cái áo bị xoá. Thêm test.
+- **4 bộ preset ảnh thẻ có sẵn trong app** (Nam trẻ, Nữ trẻ, Nam lớn tuổi, Nữ lớn tuổi): hiện ngay lần mở đầu ở ô
+  Preset theo đối tượng (Chuyên sâu) và ô Tông màu (Đơn giản), cập nhật cùng app, không sửa/xoá được (Tạo bản sao rồi sửa).
+  Bản chép nạp tay từ bản cũ: giống hệt thì tự dọn, đã sửa thì giữ dưới tên "(của bạn)". Không đụng bộ do người dùng tạo.
+
+## Thay đổi ở 0.15.1 (sửa từ máy thật)
+
+- "Chọn GPU mà render lại dùng CPU": model AI vẫn chạy trên GPU (ô Nền ghi "(fp32)" chỉ khi chạy GPU), nhưng các bước
+  màu, tông, khử bóng da, ghép mặt là xử lý ảnh trên CPU và chiếm phần lớn thời gian; đồng hồ GPU của Windows / Game Bar
+  chỉ đếm phần 3D, không đếm CUDA (xem Task Manager → GPU → "Cuda" hoặc "Compute"). Tóm tắt kết quả giờ ghi tách thời
+  gian model AI trên GPU và phần xử lý trên CPU. Khử bóng da nhanh hơn khoảng 3 giây mỗi ảnh (làm mờ σ lớn trên ảnh thu
+  nhỏ, tính bản đồ bóng một lần; lệch trung bình 0,03 mức xám). Chọn GPU mà ảnh thật sự chạy CPU (GPU lỗi giữa chừng):
+  thanh trạng thái báo ⚠ kèm lý do.
+- Khu tiến độ mới ở đáy vùng ảnh (thay thanh 4 px trong thanh trạng thái bị cắt chữ): tên bước đang làm, thanh % cao
+  theo cỡ chữ, thời gian đã chạy và còn lại ước tính, nút Huỷ; cỡ theo cỡ chữ hệ thống nên không bị cắt ở DPI cao.
+
+## Thay đổi ở 0.15.0 (tối ưu theo dòng card đồ hoạ)
+
+- Tự nhận dòng card và bộ nhớ (`net_anh/gpu_profile.py`): NVIDIA theo thế hệ chip đọc từ driver (GTX 900, GTX 10, GTX 16,
+  RTX 20/30/40/50), Intel Arc / Iris Xe, AMD (ROCm, DirectML), Apple. Ô Thiết bị ghi dòng card, kiểu số, cỡ ô, cách làm thư
+  mục và mức hỗ trợ; nút **Khuyến nghị theo card…** (và menu Trợ giúp) mở bảng dưới, tô đậm dòng của máy này.
+- Kiểu số có kiểm tra tự động: mỗi model nền khi nạp lên GPU chạy một ảnh mẫu (có mảng sáng phẳng, chỗ làm fp16 hay tràn
+  số) ở fp32 và ở kiểu nhanh hơn; lệch quá 3 mức xám, ra NaN hay ra đen thì dùng fp32 cho model đó. Khi chạy thật, ô nào
+  hỏng vẫn tự chạy lại fp32 như 0.8.1. GTX 16 và GTX 10 luôn fp32 (không thử). RTX 30 trở lên: fp16 cho Real-ESRGAN,
+  RealPLKSR; DAT-2 thử bf16 (fp16 của DAT-2 ra NaN, đo được trên CPU), bật TF32. Ép kiểu để đo: `NETANH_PRECISION=fp32`.
+- Cắt ô theo bộ nhớ GPU còn trống (Settings.tile mặc định −1 = tự động, CLI `--tile -1`): card 4–6 GB cắt ô nhỏ cho
+  model nặng, card 12 GB trở lên gần như không phải cắt với model nhẹ, ô DAT-2 lớn gấp 2–3 lần trước (ít đường ghép,
+  nhanh hơn). Thiếu bộ nhớ thật vẫn tự chia đôi ô. CPU giữ ô 400 px.
+- Làm cả thư mục nhanh hơn (`net_anh/batch.py`, dùng cho cả giao diện và dòng lệnh): model nạp một lần, ảnh kế tiếp được
+  đọc trước trong lúc ảnh hiện tại đang chạy, ghi file ở luồng riêng; GPU NVIDIA từ 11 GB VRAM, máy 16 GB RAM, 8 luồng
+  thì chạy 2 ảnh song song (mỗi luồng một bộ model, chia đôi bộ nhớ khi tính ô). Ép số luồng: CLI `--song-song N`, hoặc
+  biến `NETANH_BATCH_WORKERS`.
+- GTX 10 / GTX 900: PyTorch CUDA 12.8 trở lên không còn mã máy cho Pascal, Maxwell (đọc được trong bản PyTorch mới:
+  sm_75 trở lên). Thêm gói **cuda_old** (PyTorch CUDA 12.6) ở BeautyHDR.exe và `build_windows.ps1 -Flavor cuda_old`;
+  BeautyHDR.exe tự chọn theo tên card và hỏi chuyển nếu máy GTX 10 đã lỡ cài bản GPU thường. App không còn liệt kê card
+  mà bản PyTorch đang cài không chạy được (trước đây chạy là lỗi "no kernel image"), mà ghi lý do.
+- Tăng tốc theo card × model: model tích chập (compact, RealPLKSR, x4plus) ở fp16/bf16 trên card có Tensor Core (RTX 20
+  trở lên) xếp dữ liệu kênh cuối (channels_last, ảnh ra không đổi; ép `NETANH_CHANNELS_LAST=0|1`). Model mặt GFPGAN,
+  RestoreFormer chạy thử bf16 trên RTX 30 trở lên (fp16 bị loại: GFPGAN fp16 lệch 91 mức xám, đo trên CPU), ra NaN thì
+  tự về fp32. Làm thư mục từ 3 ảnh trên NVIDIA: bật cuDNN tự chọn thuật toán (`NETANH_CUDNN_BENCHMARK=0` để tắt). Bảng
+  **Khuyến nghị theo card…** có thêm bảng từng model (kiểu số, kênh cuối, cỡ ô, thời gian ước lượng) cho card của máy.
+- Dữ liệu card × model tách khỏi code, để sau này thêm model nặng hơn: `net_anh/du_lieu/model_profiles.json` khai mỗi
+  model một dòng (vai trò, kiến trúc, chạy được fp16/bf16 không, bộ nhớ mỗi điểm ảnh, tốc độ CPU, VRAM tối thiểu, cần bf16
+  thật không, ngưỡng chậm). Bảng khuyến nghị, cắt ô, ước lượng tốc độ và kiểm phần cứng (app ghi chú khi model chậm hoặc
+  thiếu VRAM trên card này) đều dựng từ file đó. File đo (`--do-gpu`) có thêm `schema` và danh sách bản ghi phẳng (một số
+  một dòng: dòng card, card, model, kiểu số, loại số đo, giá trị, cỡ ô, kênh cuối, bản app/PyTorch/driver);
+  `python tools/nhap_so_do.py <file.json>` gộp vào `net_anh/du_lieu/so_do_gpu.json`, và app dùng trung vị số đo thật
+  thay cho ước lượng (bảng ghi "(đo)"). `NETANH_DATA_DIR` trỏ tới thư mục khác để thử bảng mới không phải build lại.
+- Intel Arc / Iris Xe (gói xpu từ 0.14.1) giữ fp32, cắt ô theo bộ nhớ; AMD chưa có gói cài sẵn (ROCm hoặc DirectML tự cài
+  từ mã nguồn), thử nghiệm.
+- Đo trên card thật: **Trợ giúp → Đo tốc độ card…** hoặc `NetAnh.exe --do-gpu` (`python app.py --do-gpu`, thêm `--nhanh`):
+  đo từng model nền ở fp32/fp16/bf16 (lệch so với fp32, thời gian ô 256 và 512 px, byte bộ nhớ mỗi điểm ảnh), GFPGAN, cả
+  quy trình 1 và 2 luồng, ghi file `BeautyHDR-do-gpu-….txt` ra Desktop. Các số tốc độ GPU trong bảng là ước lượng, chưa
+  đo trên card thật.
+
+Bảng khuyến nghị (cột Cắt ô: cạnh ô lớn nhất theo VRAM, compact fp16 / DAT-2 bf16 hoặc fp32, khi card còn trống 90 % bộ nhớ):
+
+| Dòng card | Ví dụ | Kiểu số (thử theo thứ tự) | Cắt ô (compact / DAT-2) | Nên dùng | Hàng loạt | Mức hỗ trợ |
+|---|---|---|---|---|---|---|
+| GeForce RTX 50 (Blackwell) | RTX 5060, 5070, 5080, 5090 | fp16 → bf16 → fp32 | 8 GB: 1536 / 576 px · 12 GB: 1536 / 736 px · 16 GB: 1536 / 864 px · 32 GB: 1536 / 1248 px | mức 1–6 | 2 ảnh song song khi ≥ 11 GB VRAM, 16 GB RAM, 8 luồng | đầy đủ |
+| GeForce RTX 40 (Ada) | RTX 4060, 4070, 4080, 4090 | fp16 → bf16 → fp32 | 8 GB: 1536 / 576 px · 12 GB: 1536 / 736 px · 16 GB: 1536 / 864 px · 24 GB: 1536 / 1088 px | mức 1–6 | 2 ảnh song song khi ≥ 11 GB VRAM, 16 GB RAM, 8 luồng | đầy đủ |
+| GeForce RTX 30 (Ampere) | RTX 3050, 3060, 3070, 3080, 3090 | fp16 → bf16 → fp32 | 4 GB: 1344 / 352 px · 8 GB: 1536 / 576 px · 12 GB: 1536 / 736 px · 24 GB: 1536 / 1088 px | mức 1–6 từ 6 GB; 4 GB nên mức 1–5 | 2 ảnh song song khi ≥ 11 GB VRAM, 16 GB RAM, 8 luồng | đầy đủ |
+| GeForce RTX 20 (Turing có Tensor Core) | RTX 2060, 2070, 2080, Titan RTX | fp16 → fp32 | 6 GB: 1536 / 320 px · 8 GB: 1536 / 384 px · 11 GB: 1536 / 480 px | mức 1–6 | 2 ảnh song song khi ≥ 11 GB VRAM, 16 GB RAM, 8 luồng | đầy đủ |
+| GeForce GTX 16 (Turing không Tensor Core) | GTX 1630, 1650, 1660, 1660 Ti, 1660 Super, MX450 | fp32 | 4 GB: 960 / 224 px · 6 GB: 1280 / 320 px | mức 1–6 từ 6 GB; 4 GB nên mức 1–5 | 1 ảnh, đọc/ghi file song song | đầy đủ |
+| GeForce GTX 10 (Pascal) | GTX 1050, 1050 Ti, 1060, 1070, 1080, MX150–MX350 | fp32 | 2 GB: 448 / 128 px · 4 GB: 960 / 224 px · 6 GB: 1280 / 320 px · 8 GB: 1536 / 384 px · 11 GB: 1536 / 480 px | mức 1–6 từ 6 GB; 2 GB nên mức 1–5 | 2 ảnh song song khi ≥ 11 GB VRAM, 16 GB RAM, 8 luồng | đầy đủ |
+| GeForce GTX 900 / 750 (Maxwell) | GTX 750 Ti, 950, 960, 970, 980 | fp32 | 2 GB: 448 / 128 px · 4 GB: 960 / 224 px | mức 1–6 từ 6 GB; 2 GB nên mức 1–5 | 1 ảnh, đọc/ghi file song song | thử nghiệm |
+| Intel Arc (XPU) | Arc A380–A770, B570, B580, Arc trong Core Ultra | fp32 | 6 GB: 1280 / 320 px · 8 GB: 1536 / 384 px · 12 GB: 1536 / 512 px · 16 GB: 1536 / 608 px | mức 1–6 | 1 ảnh, đọc/ghi file song song | thử nghiệm |
+| Intel Iris Xe / UHD (XPU) | Iris Xe, UHD 7xx | fp32 | theo bộ nhớ đọc được, không đọc được thì 400 px | mức 1–5; mức 6 chậm | 1 ảnh, đọc/ghi file song song | thử nghiệm |
+| AMD Radeon qua ROCm | RX 7600–7900, RX 9060–9070 (ROCm trên Linux, bản xem trước trên Windows) | fp16 → fp32 | 8 GB: 1536 / 384 px · 16 GB: 1536 / 608 px · 24 GB: 1536 / 768 px | mức 1–6 | 2 ảnh song song khi ≥ 11 GB VRAM, 16 GB RAM, 8 luồng | thử nghiệm |
+| AMD / Intel qua DirectML | Radeon RX 5000–9000, Vega, card tích hợp | fp32 | theo bộ nhớ đọc được, không đọc được thì 400 px | mức 1–5; mức 6 chậm | 1 ảnh, đọc/ghi file song song | thử nghiệm |
+| Apple Silicon (Metal) | M1–M4 | fp32 | theo bộ nhớ đọc được, không đọc được thì 400 px | mức 1–5; mức 6 chậm | 1 ảnh, đọc/ghi file song song | thử nghiệm |
+| CPU | Mọi máy | fp32 | 400 px | mức 1–5 (model nhẹ); mức 6 rất chậm | 1 ảnh, đọc/ghi file song song | đầy đủ |
+
+## Thay đổi ở 0.14.2 (màu cảnh ảnh cũ, Tô màu AI, preset ảnh thẻ; gộp sửa loang 0.14.1)
+
+- Gộp bản sửa loang màu tông mẫu (look.py: nền chỉ làm phẳng khi thật sự trơn, "da" theo màu chỉ quanh mặt, gỡ ám chỉ vùng trắng thật)
+  vào nhánh có BeautyHDR.exe (0.14.1 nhận diện card NVIDIA/AMD/Intel). Trước đây hai thay đổi này nằm ở hai nơi.
+- Khôi phục ảnh cũ, ô "Nâng màu sặc sỡ cho cảnh" (Chuyên sâu; Settings.scene_vivid, CLI --scene-vivid 0..1): ảnh cũ chụp cảnh
+  (nền không đồng màu) được gỡ ám vùng sáng, kéo sáng, ấm vùng tối/giữa và tăng độ rực; bỏ qua ảnh đen trắng và ảnh thẻ nền đồng màu.
+- Ô "Tô màu AI cho cảnh" (Settings.scene_ai, CLI --scene-ai, cần ô trên): DDColor (Apache-2.0, net_anh/colorize.py, archs/ddcolor_arch)
+  đoán lại màu theo ngữ nghĩa (áo trắng, quần jeans, cây xanh), ghép a, b ở cuối pipeline. Model 912 MB tải riêng ở lần đầu bật,
+  không nằm trong bộ model mặc định. Ảnh còn đủ màu (sắc độ Lab trung bình trên 10, như ảnh điện thoại) được bỏ qua vì tô lại ra loè loẹt;
+  ảnh phai dưới 7,5 tô đủ (restore.ai_color_weight). Ngưỡng mới chỉnh trên 1 ảnh mẫu; chưa có ở chế độ Đơn giản và Android.
+- Thư mục presets/: 4 bộ preset ảnh thẻ (nam/nữ, trẻ/lớn tuổi; bộ lớn tuổi không trẻ hoá) + HUONG_DAN.txt cách nạp
+  (Chuyên sâu > Quản lý… > Nạp từ file…). tools/id_preset_bench.py đo tuổi trước/sau.
 
 ## Thay đổi ở 0.13.1
 

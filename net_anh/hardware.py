@@ -24,6 +24,19 @@ class Gpu:
     name: str
     vram_gb: float  # 0 = không rõ
     usable: bool  # PyTorch bản đang cài chạy được trên GPU này
+    legacy: bool = False  # NVIDIA đời Pascal / Maxwell (GTX 10, GTX 900): cần bản GPU cho card đời cũ (CUDA 12.6)
+
+    @property
+    def family(self):
+        from . import gpu_profile
+
+        if self.vendor == "nvidia":
+            return gpu_profile.nvidia_family(self.name)
+        if self.vendor == "intel":
+            return gpu_profile.family_of("xpu", self.name)
+        if self.vendor == "amd":
+            return gpu_profile.FAMILIES["amd_rocm" if gpu_profile.amd_rdna3_plus(self.name) else "amd_dml"]
+        return gpu_profile.FAMILIES["cpu"]
 
     @property
     def vendor(self) -> str:
@@ -39,6 +52,16 @@ class Gpu:
 
 def advice(g: Gpu) -> str:
     """Vì sao card này chưa dùng được và làm gì (hiện ở ô Thiết bị, cảnh báo và Quản lý model)."""
+    if g.vendor == "nvidia" and g.legacy and not str(getattr(torch.version, "cuda", "") or "").startswith("12.6"):
+        return (f"Máy có {g.name} (đời Pascal/Maxwell): PyTorch bản GPU mới không còn chạy trên dòng này. Mở lại "
+                "BeautyHDR.exe và chọn bản GPU cho card đời cũ (giữ nguyên model).")
+    if g.vendor == "nvidia" and g.family.key == "kepler":
+        return (f"Máy có {g.name} (đời Kepler): PyTorch không còn bản nào chạy AI trên dòng card này, app dùng CPU. "
+                "Muốn nhanh hơn cần card từ GTX 750 Ti / GTX 900 trở lên.")
+    if g.vendor == "nvidia" and getattr(torch.version, "cuda", None):
+        return (f"Máy có {g.name} và bản GPU đã cài nhưng chưa dùng được card: thường do driver NVIDIA quá cũ hoặc chưa "
+                "cài. Cập nhật driver mới nhất từ nvidia.com (bản GPU thường cần driver 570 trở lên, bản cho card đời cũ "
+                "cần 560 trở lên) rồi mở lại app.")
     if g.vendor == "nvidia":
         return (f"Máy có {g.name} nhưng bản đang cài chỉ chạy CPU. Mở lại BeautyHDR.exe và chọn bản GPU NVIDIA "
                 "để dùng card (giữ nguyên model).")
@@ -187,7 +210,10 @@ def _nvidia_smi() -> list[Gpu]:
     for line in out.splitlines():
         m = re.match(r"\s*(.+?)\s*,\s*([\d.]+)\s*$", line)
         if m:
-            gpus.append(Gpu(m[1], float(m[2]) / 1024, False))
+            from .gpu_profile import nvidia_family
+
+            fam = nvidia_family(m[1])
+            gpus.append(Gpu(m[1], float(m[2]) / 1024, False, legacy=fam.key in ("gtx10", "maxwell")))
     return gpus
 
 
@@ -231,9 +257,16 @@ def machine() -> Machine:
     gpus: list[Gpu] = []
     cuda = torch.cuda.is_available()
     if cuda:
+        from .gpu_profile import arch_supported
+
+        try:
+            arch = [] if getattr(torch.version, "hip", None) else torch.cuda.get_arch_list()
+        except Exception:
+            arch = []
         for i in range(torch.cuda.device_count()):
             p = torch.cuda.get_device_properties(i)
-            gpus.append(Gpu(p.name, p.total_memory / 1024**3, True))
+            ok = arch_supported((p.major, p.minor), arch)
+            gpus.append(Gpu(p.name, p.total_memory / 1024**3, ok, legacy=not ok and p.major < 7))
     else:
         gpus += _nvidia_smi()
     try:
@@ -260,8 +293,16 @@ def machine() -> Machine:
 
 
 def _speedup(kind: str, threads: int) -> float:
-    """Nhanh hơn CPU 4 luồng (nơi đo COST) bao nhiêu lần."""
+    """Nhanh hơn CPU 4 luồng (nơi đo COST) bao nhiêu lần. GPU: theo dòng card đang dùng (gpu_profile.Family.speedup,
+    ước lượng), không rõ dòng thì GPU_SPEEDUP theo loại."""
     if kind in GPU_SPEEDUP:
+        try:
+            g = next((x for x in machine().gpus if x.usable), None)
+        except Exception:
+            g = None
+        fam = g.family if g is not None else None
+        if fam is not None and fam.key != "cpu" and kind in ("cuda", "xpu"):
+            return float(fam.speedup)
         return GPU_SPEEDUP[kind]
     return max(0.5, min(threads, 16) / 4)
 

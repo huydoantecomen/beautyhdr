@@ -177,3 +177,47 @@ def test_feature_guard_drops_specks_on_eyes_and_lips():
         assert prot[y, x]
     assert head[230, 250] and not head[20, 20]
     assert not prot[380, 480]
+
+
+def test_scene_vivid_only_on_colour_scenes():
+    """Nâng màu cảnh (ảnh cũ): chỉ ảnh màu có cảnh; ảnh đen trắng và ảnh thẻ nền đồng màu giữ nguyên."""
+    from net_anh import restore
+    rng = np.random.default_rng(1)
+    scene = (rng.random((240, 320, 3)) * 60 + 90).astype(np.uint8)
+    scene[:, :, 2] = np.clip(scene[:, :, 2].astype(int) + 40, 0, 255)  # lệch đỏ: có màu
+    out, note = restore.scene_vivid(scene, 1.0)
+    assert note.startswith("Cảnh")
+    c = lambda x: float(np.hypot(*(cv2.cvtColor(x, cv2.COLOR_BGR2LAB).astype(np.float32)[..., 1:] - 128).transpose(2, 0, 1)).mean())
+    assert c(out) > c(scene)
+    gray = np.repeat(scene[..., :1], 3, axis=2)
+    assert np.array_equal(restore.scene_vivid(gray, 1.0)[0], gray)
+    plain = np.full((240, 320, 3), (200, 120, 40), np.uint8)
+    plain[60:200, 100:220] = (120, 150, 190)
+    assert np.array_equal(restore.scene_vivid(plain, 1.0)[0], plain)
+    assert np.array_equal(restore.scene_vivid(scene, 0.0)[0], scene)
+
+
+def test_scene_ai_color_takes_ab_from_model(monkeypatch):
+    """DDColor được thay bằng bản giả: a, b lấy từ model (kể cả khi cỡ khác), độ sáng giữ nguyên."""
+    from net_anh import colorize
+    img = np.full((60, 80, 3), 140, np.uint8)
+    fake = np.zeros((30, 40, 2), np.float32)
+    fake[..., 1] = 20.0  # b = +20: ngả vàng
+    monkeypatch.setattr(colorize, "predict_ab", lambda enh, src: fake)
+    out = restore.scene_ai_color(None, img, img, 1.0)
+    lab0 = cv2.cvtColor(img.astype(np.float32) / 255, cv2.COLOR_BGR2LAB)
+    lab1 = cv2.cvtColor(out.astype(np.float32) / 255, cv2.COLOR_BGR2LAB)
+    assert lab1[..., 2].mean() > lab0[..., 2].mean() + 15
+    assert abs(lab1[..., 0].mean() - lab0[..., 0].mean()) < 1.5
+    assert restore.scene_ai_color(None, img, img, 0.0).shape == img.shape
+
+
+def test_ai_color_skips_photo_that_still_has_colour():
+    """Tô màu AI chỉ cho ảnh phai: ảnh còn đủ màu (sắc độ trung bình > 10) bỏ qua, ảnh gần xám tô đủ."""
+    faded = np.full((40, 40, 3), (120, 128, 136), np.uint8)  # xám hơi ấm
+    vivid = np.zeros((40, 40, 3), np.uint8)
+    vivid[:, :20] = (40, 60, 200)  # đỏ
+    vivid[:, 20:] = (60, 170, 60)  # xanh lá
+    assert restore.ai_color_weight(faded)[0] == 1.0
+    k, c = restore.ai_color_weight(vivid)
+    assert k == 0.0 and c > 30

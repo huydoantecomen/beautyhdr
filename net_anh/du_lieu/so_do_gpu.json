@@ -1,0 +1,5 @@
+{
+ "schema": 1,
+ "_huong_dan": "Kho số đo thật trên card. Không sửa tay: gộp file BeautyHDR-do-gpu-*.json bằng  python tools/nhap_so_do.py <file.json>...  Mỗi bản ghi: family, card, cc, vram_gb, model, dtype, channels_last, metric (s_per_mp | s_per_face | bytes_per_px | probe_err | pipeline_s_per_image), value, tile, app, torch, date. App dùng trung vị các bản ghi cùng (family, model, dtype, metric) thay cho số ước lượng.",
+ "records": []
+}

@@ -6,6 +6,11 @@ name: Release exe
 
 on:
   workflow_dispatch:
+    inputs:
+      nhap:
+        description: "Chỉ tạo bản nháp (draft): exe người dùng chưa nhận, bấm Publish trên trang Releases khi duyệt"
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
 
@@ -16,10 +21,13 @@ jobs:
   app:
     runs-on: windows-latest
     timeout-minutes: 150
+    # cuda_old (GTX 10 / 900, PyTorch CUDA 12.6): kho PyTorch có thể ngừng phát hành cu126 cho bản torch mới; lỗi thì
+    # bản phát hành vẫn ra, chỉ thiếu gói này (máy Pascal khi đó dùng CPU và được báo rõ lý do).
+    continue-on-error: ${{ matrix.flavor == 'cuda_old' }}
     strategy:
       fail-fast: false
       matrix:
-        flavor: [cpu, cuda, xpu]
+        flavor: [cpu, cuda, cuda_old, xpu]
     env:
       PIP_NO_CACHE_DIR: "1"
       PYTHONUTF8: "1"
@@ -86,4 +94,6 @@ jobs:
           cat rel/update.json
           ls -la rel
           gh release delete "v$VER" -y --cleanup-tag || true
-          gh release create "v$VER" rel/* --title "Beauty HDR $VER" --notes "Tải BeautyHDR.exe và chạy: app và model tự tải về, mở lần sau tự cập nhật. Các file BeautyHDR-app-* là phần gói app, không cần tải tay."
+          DRAFT=""
+          if [ "${{ inputs.nhap }}" = "true" ]; then DRAFT="--draft"; fi
+          gh release create "v$VER" rel/* $DRAFT --target "${{ github.sha }}" --title "Beauty HDR $VER" --notes "Tải BeautyHDR.exe và chạy: app và model tự tải về, mở lần sau tự cập nhật. Các file BeautyHDR-app-* là phần gói app, không cần tải tay."

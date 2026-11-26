@@ -23,6 +23,7 @@ import torch
 from . import classic, weights
 from .analysis import MAX_SIDE, MIN_FACE_PX, Analysis, Face, analyze, select_faces
 from .archs import GFPGANv1Clean, RRDBNet, SRVGGNetCompact
+from . import gpu_profile
 from .device import DeviceInfo, pick_device
 from .settings import MODES, Settings
 
@@ -54,6 +55,8 @@ class Report:
     styled: bool = False  # đã áp preset đối tượng lên mặt
     bg_model: str = ""  # model nền thật sự đã chạy, kèm kiểu số trên GPU
     deshined: int = 0  # số mặt đã khử bóng da
+    device_kind: str = ""  # thiết bị thật sự đã chạy model: "cuda" | "xpu" | "cpu"…
+    model_s: float = 0.0  # thời gian chạy model AI (nền, mặt, tìm mặt, tách vùng mặt); còn lại là xử lý ảnh trên CPU
 
     def models(self) -> str:
         parts = []
@@ -77,6 +80,9 @@ class Report:
         parts = [("⚠ AI lỗi, chỉ xử lý nhanh" if self.ai_fallback else MODES.get(self.mode, self.mode)), self.models(),
                  f"Thiết bị: {self.device}",
                  f"Thời gian: {self.seconds:.1f} s"]
+        if self.model_s > 0 and self.device_kind not in ("", "cpu"):
+            parts.append(f"model AI trên GPU {self.model_s:.1f} s, xử lý màu/tông/ghép mặt trên CPU "
+                         f"{max(0.0, self.seconds - self.model_s):.1f} s")
         if self.faces_found:
             parts.append(f"Khuôn mặt: làm nét {self.faces_restored}/{self.faces_found}"
                          + (f" ({self.faces_kept} mặt lỗi model, giữ nguyên)" if self.faces_kept else ""))
@@ -326,13 +332,43 @@ class Enhancer:
     def __init__(self, device: str = "auto", progress: Progress | None = None):
         self.dev = pick_device(device)
         self.say = progress or (lambda m: None)
+        # kiểu số đã chọn cho từng model nền sau khi chạy thử: khoá → (tên kiểu, kết quả thử từng kiểu)
+        self.precision: dict[str, tuple[str, list[tuple[str, gpu_profile.ProbeResult]]]] = {}
+        self.vram_share = 1.0  # phần bộ nhớ GPU của engine này khi làm thư mục song song (batch.extra_engines)
+        self.last_tile = 0
+        if self.dev.family.tf32:  # Ampere trở lên: nhân ma trận fp32 bằng TF32 (attention của DAT-2, RestoreFormer)
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
         self.cancel_requested: Callable[[], bool] = lambda: False
+        self._model_s = 0.0
+        self._esrgan_run = self._timed(self._esrgan_run)  # đo phần chạy model (Report.model_s)
+        self._face_run = self._timed(self._face_run)
         self._esrgan: dict = {}
         self._sr_extra: dict = {}  # model nền nạp bằng spandrel (DAT-2, RealPLKSR): model_id → (mạng, kiểu số)
         self._gfpgan: torch.nn.Module | None = None
         self._helper = None
         self._agegender = None
         self._faces: list | None = None
+
+    def _timed(self, fn):
+        """Bọc hàm chạy model: cộng thời gian vào self._model_s (chờ GPU xong để đo đúng)."""
+        def run(*a, **kw):
+            t = time.perf_counter()
+            try:
+                return fn(*a, **kw)
+            finally:
+                self._sync()
+                self._model_s = getattr(self, "_model_s", 0.0) + time.perf_counter() - t
+        return run
+
+    def _sync(self) -> None:
+        try:
+            if self.dev.kind == "cuda":
+                torch.cuda.synchronize()
+            elif self.dev.kind == "xpu":
+                torch.xpu.synchronize()
+        except Exception:
+            pass
 
     def _empty_cache(self) -> None:
         try:
@@ -364,6 +400,90 @@ class Enhancer:
         if self.cancel_requested():
             raise Cancelled()
 
+    _DT = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}
+
+    def _place(self, net: torch.nn.Module, key: str, half: bool = True, bf16: bool = False) -> tuple[torch.nn.Module, torch.dtype]:
+        """Đưa model nền lên thiết bị và chọn kiểu số: thử lần lượt các kiểu dòng card cho phép (gpu_profile), mỗi kiểu
+        chạy một ảnh mẫu so với fp32; kiểu đầu tiên đạt thì dùng, không đạt kiểu nào thì fp32. Kết quả nhớ theo `key`
+        nên đổi mức khử nhiễu (nạp lại compact) không phải thử lại."""
+        net = net.eval().to(self.dev.device)
+        if self.dev.kind == "cpu":
+            return net, torch.float32
+        if key in self.precision:
+            name = self.precision[key][0]
+        else:
+            fam = self.dev.family
+            native_bf16 = self.dev.kind == "cuda" and (self.dev.cc or (0, 0))[0] >= 8 and not getattr(torch.version, "hip", None)
+            tried: list[tuple[str, gpu_profile.ProbeResult]] = []
+            name = "fp32"
+            for cand in gpu_profile.candidates(fam, half, bf16, native_bf16):
+                if cand == "fp32":
+                    break
+                r = gpu_profile.probe_dtype(net, self.dev.device, self._DT[cand])
+                tried.append((cand, r))
+                if r.ok:
+                    name = cand
+                    break
+            self.precision[key] = (name, tried)
+            bad = [f"{c} {r.why}" for c, r in tried if not r.ok]
+            if bad:
+                self.say(f"{key}: {'; '.join(bad)} trên {self.dev.name}, dùng {name}")
+        dt = self._DT[name]
+        net = net.to(dt)
+        self._memory_format(net, gpu_profile.MODEL_OF_KEY.get(key, key), name)
+        return net, dt
+
+    def _memory_format(self, net: torch.nn.Module, model: str, dtype: str) -> None:
+        """Tensor Core + fp16/bf16 + mạng tích chập: xếp trọng số kênh cuối (gpu_profile.channels_last); _forward đổi
+        ảnh vào theo. Đánh dấu trên mạng để quay về fp32 (sửa tràn số) vẫn đúng."""
+        cl = gpu_profile.channels_last(self.dev.kind, self.dev.cc, dtype, model)
+        if cl:
+            gpu_profile.to_channels_last(net)
+        net._netanh_cl = cl
+
+    def _place_face(self, net: torch.nn.Module, key: str) -> torch.nn.Module:
+        """Model mặt lên thiết bị: chạy thử mặt mẫu 512 px ở các kiểu số nhanh (gpu_profile.face_candidates) so với fp32,
+        đạt thì dùng. GTX 16, GTX 10, Intel, CPU: fp32 như cũ."""
+        net = net.eval().to(self.dev.device)
+        net._netanh_cl = False
+        if self.dev.kind == "cpu":
+            return net
+        if key not in self.precision:
+            tried: list[tuple[str, gpu_profile.ProbeResult]] = []
+            name = "fp32"
+            native_bf16 = self.dev.kind == "cuda" and (self.dev.cc or (0, 0))[0] >= 8 and not getattr(torch.version, "hip", None)
+            for cand in gpu_profile.face_candidates(self.dev.family, key):
+                if cand == "fp32" or (cand == "bf16" and not native_bf16):
+                    continue
+                r = gpu_profile.probe_dtype(net, self.dev.device, self._DT[cand], size=512, fn=gpu_profile.face_forward)
+                tried.append((cand, r))
+                if r.ok:
+                    name = cand
+                    break
+            self.precision[key] = (name, tried)
+            bad = [f"{c} {r.why}" for c, r in tried if not r.ok]
+            if bad:
+                self.say(f"{key}: {'; '.join(bad)} trên {self.dev.name}, dùng {name}")
+        name = self.precision[key][0]
+        net = net.to(self._DT[name])
+        self._memory_format(net, key, name)
+        return net
+
+    def _face_run(self, net: torch.nn.Module, t: torch.Tensor) -> torch.Tensor:
+        """Chạy model mặt đúng kiểu số và cách xếp bộ nhớ của nó; fp16/bf16 ra NaN thì đổi model đó về fp32 và chạy lại."""
+        params = getattr(net, "parameters", None)
+        pdt = next(params()).dtype if params is not None else torch.float32
+        x = t.to(pdt)
+        if getattr(net, "_netanh_cl", False):
+            x = x.contiguous(memory_format=torch.channels_last)
+        o = net(x, return_rgb=False)[0]
+        if pdt != torch.float32 and not torch.isfinite(o).all():
+            net.float()
+            net._netanh_cl = False
+            gpu_profile.to_contiguous(net)
+            o = net(t.float().contiguous(), return_rgb=False)[0]
+        return o.float()
+
     # ----- nạp model khi cần -----
 
     def _ensure(self, model_id: str):
@@ -383,9 +503,7 @@ class Enhancer:
                 a = {k: dn * v + (1 - dn) * b[k] for k, v in a.items()}
             net = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=32, upscale=4, act_type="prelu")
             net.load_state_dict(a, strict=True)
-            net.eval().to(self.dev.device)
-            if self.dev.half:
-                net.half()
+            net, _ = self._place(net, "compact")
             self._esrgan = {k: v for k, v in self._esrgan.items() if not isinstance(k, tuple)}  # chỉ giữ 1 mức
             self._esrgan[key] = net
         return self._esrgan[key]
@@ -402,13 +520,9 @@ class Enhancer:
             desc = spandrel.ModelLoader(device="cpu").load_from_file(str(path))
             if desc.scale != 4:
                 raise weights.ModelError(f"{info.file}: cần model phóng 4×, file này {desc.scale}×")
-            dtype = torch.float32  # luôn ghi rõ: thiết bị dùng fp16 cho Real-ESRGAN nhưng DAT-2 không chạy được fp16
-            if self.dev.kind == "cuda":
-                if desc.supports_half and self.dev.half:
-                    dtype = torch.float16
-                elif desc.supports_bfloat16 and torch.cuda.get_device_capability(self.dev.device)[0] >= 8:  # bf16 thật (RTX 30 trở lên), không giả lập
-                    dtype = torch.bfloat16
-            net = desc.model.eval().to(self.dev.device, dtype)
+            # DAT-2 không chạy fp16 (supports_half False): RTX 30 trở lên thử bf16 thật (Turing chỉ giả lập bf16), không
+            # thì fp32. torch.cuda.is_bf16_supported() trả True giả trên Turing nên xét compute capability ≥ 8.
+            net, dtype = self._place(desc.model, model_id, bool(desc.supports_half), bool(desc.supports_bfloat16))
             self._sr_extra = {model_id: (net, dtype)}
         return self._sr_extra[model_id]
 
@@ -419,9 +533,7 @@ class Enhancer:
             net = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=scale)
             ckpt = torch.load(path, map_location="cpu", weights_only=True)
             net.load_state_dict(ckpt.get("params_ema", ckpt.get("params", ckpt)), strict=True)
-            net.eval().to(self.dev.device)
-            if self.dev.half:
-                net.half()
+            net, _ = self._place(net, f"esrgan_x{scale}")
             self._esrgan[scale] = net
         return self._esrgan[scale]
 
@@ -435,7 +547,7 @@ class Enhancer:
                 ckpt = torch.load(path, map_location="cpu", weights_only=True)  # checkpoint Lightning gốc của tác giả
                 sd = ckpt.get("state_dict", ckpt)
                 net.load_state_dict({k.removeprefix("vqvae."): v for k, v in sd.items()}, strict=True)
-                self._restoreformer_pp = net.eval().to(self.dev.device)
+                self._restoreformer_pp = self._place_face(net, "restoreformer_pp")
             return self._restoreformer_pp
         if name == "restoreformer":
             if getattr(self, "_restoreformer", None) is None:
@@ -445,7 +557,7 @@ class Enhancer:
                 net = RestoreFormer()
                 ckpt = torch.load(path, map_location="cpu", weights_only=True)
                 net.load_state_dict(ckpt.get("params_ema", ckpt.get("params", ckpt)), strict=True)
-                self._restoreformer = net.eval().to(self.dev.device)
+                self._restoreformer = self._place_face(net, "restoreformer")
             return self._restoreformer
         return self._load_gfpgan()
 
@@ -458,7 +570,7 @@ class Enhancer:
                                 sft_half=True)
             ckpt = torch.load(path, map_location="cpu", weights_only=True)
             net.load_state_dict(ckpt.get("params_ema", ckpt), strict=True)
-            self._gfpgan = net.eval().to(self.dev.device)
+            self._gfpgan = self._place_face(net, "gfpgan")
         return self._gfpgan
 
     # nhãn ParseNet (CelebAMask-HQ): 2–3 lông mày, 4–5 mắt, 6 kính, 11 miệng, 12–13 môi
@@ -521,9 +633,12 @@ class Enhancer:
     @torch.no_grad()
     def _parse(self, helper, face512: np.ndarray) -> np.ndarray:
         """Nhãn ParseNet (512×512) của mặt đã căn."""
+        t0 = time.perf_counter()
         x = cv2.cvtColor(face512, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         t = torch.from_numpy(((x - 0.5) / 0.5).transpose(2, 0, 1)).unsqueeze(0).to(helper.device)
-        return helper.face_parse(t)[0].argmax(dim=1).squeeze().cpu().numpy()
+        lab = helper.face_parse(t)[0].argmax(dim=1).squeeze().cpu().numpy()
+        self._model_s = getattr(self, "_model_s", 0.0) + time.perf_counter() - t0
+        return lab
 
     def _subjects(self, img: np.ndarray, lms: list, s: Settings, rep: "Report") -> list[str | None]:
         """Đối tượng của từng mặt (khoá facestyle.SUBJECT_KEYS, None = không áp preset). Đoán tuổi, giới tính lỗi
@@ -741,6 +856,7 @@ class Enhancer:
             self._helper = FaceRestoreHelper(upscale, face_size=512, crop_ratio=(1, 1),
                                              det_model="retinaface_resnet50", save_ext="png", use_parse=True,
                                              device=det_device, model_rootpath=str(weights.weights_dir()))
+            self._helper.get_face_landmarks_5 = self._timed(self._helper.get_face_landmarks_5)
         self._helper.clean_all()
         self._helper.set_upscale_factor(upscale)
         return self._helper
@@ -777,15 +893,13 @@ class Enhancer:
     @torch.no_grad()
     def _esrgan_run(self, img: np.ndarray, scale: int, tile: int, net=None, dtype: torch.dtype | None = None,
                     pad: int = 10, label: str = "Real-ESRGAN") -> np.ndarray:
-        """`dtype`: kiểu số của model nạp bằng spandrel (None: fp16 nếu thiết bị dùng fp16, như Real-ESRGAN)."""
+        """Ảnh vào được đổi sang đúng kiểu số của model (fp32 / fp16 / bf16 do _place chọn). `dtype` giữ để tương thích."""
         net = net if net is not None else self._load_esrgan(scale)
         h, w = img.shape[:2]
         ph, pw = h % 2, w % 2  # mô hình x2 dùng pixel_unshuffle: cạnh phải chẵn
         if ph or pw:
             img = cv2.copyMakeBorder(img, 0, ph, 0, pw, cv2.BORDER_REFLECT)
-        x = _to_tensor(img, self.dev, self.dev.half and dtype is None)
-        if dtype is not None:
-            x = x.to(dtype)
+        x = _to_tensor(img, self.dev, False).to(next(net.parameters()).dtype)
         if not tile or (x.shape[2] <= tile and x.shape[3] <= tile):
             return _to_image(self._forward(net, x))[: h * scale, : w * scale]
         return self._tiled(net, x, scale, tile, pad=pad, label=label)[: h * scale, : w * scale]
@@ -794,17 +908,30 @@ class Enhancer:
         """Chạy mạng nền. fp16 có thể tràn số (ra NaN/vô cực, thành mảng đen) ở vùng sáng phẳng trên một số GPU và
         bản PyTorch: gặp thì đổi hẳn mạng đó sang fp32 và chạy lại ô này (các ô sau cũng chạy fp32)."""
         pdt = next(net.parameters()).dtype
-        o = net(x.to(pdt))
+        x = x.to(pdt)
+        if getattr(net, "_netanh_cl", False):
+            x = x.contiguous(memory_format=torch.channels_last)
+        o = net(x)
         # ô ra toàn đen trong khi ảnh vào không tối cũng là dấu hiệu tràn số (giá trị lỗi bị kẹp về 0)
         if not torch.isfinite(o).all() or (pdt != torch.float32 and float(o.amax()) < 0.02 < float(x.amax())):
             if pdt != torch.float32:
                 net.float()
+                if getattr(net, "_netanh_cl", False):  # fp32 trên card cũ hơn không lợi từ kênh cuối: về như cũ
+                    gpu_profile.to_contiguous(net)
+                    net._netanh_cl = False
                 self._fp32_fallback = True
-                o = net(x.float())
+                o = net(x.float().contiguous())
             if not torch.isfinite(o).all():  # vẫn lỗi ở fp32: thay giá trị lỗi để khỏi ra mảng đen
                 self._nonfinite = True
                 o = torch.nan_to_num(o.float(), nan=0.5, posinf=1.0, neginf=0.0)
         return o
+
+    def _auto_tile(self, model: str, net) -> int:
+        if self.dev.kind == "cpu":
+            return gpu_profile.CPU_TILE
+        dt = {torch.float16: "fp16", torch.bfloat16: "bf16"}.get(next(net.parameters()).dtype, "fp32")
+        k = self.vram_share
+        return gpu_profile.auto_tile(model, self.dev.free_vram_gb() * k, self.dev.vram_gb * k, dt, self.dev.family.key)
 
     def _tiled(self, net, x: torch.Tensor, scale: int, tile: int, pad: int, label: str = "Real-ESRGAN") -> np.ndarray:
         """Chạy chia ô, ghép vào ảnh uint8 trên RAM (không giữ tensor float cả ảnh ra: ảnh 12 MP phóng 4× là 192 MP,
@@ -891,8 +1018,22 @@ class Enhancer:
             if not compact:
                 scale = 4
         tile = s.tile
-        if extra and tile:
+        if tile < 0:  # tự động: GPU theo bộ nhớ còn trống và kiểu số, CPU 400 px như cũ
+            tile = self._auto_tile(s.sr_model if s.sr_model in gpu_profile.ACT_BYTES_PER_PX else "rrdb",
+                                   net if net is not None else self._load_esrgan(scale))
+            if self.dev.kind not in ("cuda", "xpu") and extra:  # DirectML, Metal: không đọc được bộ nhớ, giữ trần cũ
+                tile = min(tile, weights.MANIFEST[extra].tile or tile)
+            # ô to thì dải cộng dồn float32 trên RAM (cao một hàng ô × rộng cả ảnh ra) cũng to: ảnh rộng 4000 px phóng 4×
+            # với ô 1536 px là gần 1,2 GB. Giữ dải dưới gpu_profile.BAND_BYTES để máy 8 GB RAM không thiếu bộ nhớ.
+            band = int(gpu_profile.BAND_BYTES / (12 * scale * scale * max(1, img.shape[1])))
+            tile = max(gpu_profile.TILE_MIN, min(tile, band - band % 32))
+        elif extra and tile:
             tile = min(tile, weights.MANIFEST[extra].tile or tile)
+        self.last_tile = tile
+        mkey = s.sr_model if s.sr_model in gpu_profile.MODEL_DB else "rrdb"
+        lvl, why = gpu_profile.fits(self.dev.family, mkey, self.dev.vram_gb)
+        if lvl != "ok" and self.dev.kind != "cpu":  # yêu cầu phần cứng khai trong du_lieu/model_profiles.json
+            rep.notes.append(f"{label if extra else gpu_profile.MODEL_DB[mkey].label} trên {self.dev.name}: {why}")
         self._fp32_fallback = self._nonfinite = False
         while True:
             try:
@@ -911,9 +1052,7 @@ class Enhancer:
         else:
             name = f"Real-ESRGAN x{scale}plus"
         if self.dev.kind != "cpu":
-            p = next(net.parameters()).dtype if net is not None else (torch.float16 if self.dev.half else torch.float32)
-            if net is None:
-                p = next(self._load_esrgan(scale).parameters()).dtype
+            p = next((net if net is not None else self._load_esrgan(scale)).parameters()).dtype
             name += {torch.float16: " (fp16)", torch.bfloat16: " (bf16)"}.get(p, " (fp32)")
         rep.bg_model = name
         if self._fp32_fallback:
@@ -935,6 +1074,7 @@ class Enhancer:
         s = s or Settings()
         rep = Report(mode=s.mode, device=self.dev.name)
         t0 = time.perf_counter()
+        self._model_s = 0.0
         h, w = img.shape[:2]
         if max(h, w) > MAX_SIDE:
             img = resize_long(img, MAX_SIDE)  # chặn mỗi cạnh tối thiểu 1 px (ảnh dải rất dài và hẹp)
@@ -945,10 +1085,13 @@ class Enhancer:
             if s.upscale == 4:
                 rep.notes.append(f"Ảnh nhỏ ({img.shape[1]}×{img.shape[0]} px): phóng 4× để ảnh ra đủ lớn")
         self._repair_mask = None
-        if s.repair > 0 or s.fade > 0 or s.auto_rotate or s.damage_mask:
+        self._scene_applied = False
+        self._ai_src = None
+        if s.repair > 0 or s.fade > 0 or s.auto_rotate or s.damage_mask or s.scene_vivid > 0:
             from . import restore
             try:
-                img = restore.run(self, img, s.repair, s.fade, s.auto_rotate, rep, s.damage_mask, s.fade_style)
+                img = restore.run(self, img, s.repair, s.fade, s.auto_rotate, rep, s.damage_mask, s.fade_style, s.scene_vivid,
+                                  s.scene_ai if s.scene_vivid > 0 else 0.0)
             except (Cancelled, InterruptedError):
                 raise
             except (weights.ModelError, OSError, RuntimeError, MemoryError) as e:
@@ -1022,6 +1165,21 @@ class Enhancer:
                 raise
             except Exception as e:  # không để lỗi tông mẫu làm mất cả kết quả
                 rep.notes.append(f"Không áp được tông mẫu ({e.__class__.__name__})")
+        if s.scene_vivid > 0 and getattr(self, "_scene_applied", False):
+            from . import restore
+            out = restore.scene_finish(out, s.scene_vivid)
+            src = getattr(self, "_ai_src", None)
+            if s.scene_ai > 0 and src is not None:
+                k, chroma = restore.ai_color_weight(src)
+                if k <= 0:
+                    rep.notes.append(f"Bỏ qua tô màu AI: ảnh còn đủ màu (sắc độ {chroma:.1f}), tô lại sẽ loè loẹt")
+            if s.scene_ai > 0 and src is not None and k > 0:
+                try:
+                    self.say("Đang tô màu AI (DDColor)…")
+                    out = restore.scene_ai_color(self, src, out, s.scene_ai * k)
+                except Exception as e:  # thiếu model/RAM: giữ bản chỉnh màu thường
+                    rep.notes.append(f"Không tô màu AI được: {e}")
+            self._ai_src = None
         if s.bg_color is not None:
             from . import backdrop
             try:
@@ -1030,6 +1188,9 @@ class Enhancer:
             except Exception as e:  # không để lỗi đổi nền làm mất cả kết quả
                 rep.notes.append(f"Không đổi được nền ({e.__class__.__name__})")
         rep.seconds = time.perf_counter() - t0
+        rep.model_s = self._model_s
+        rep.device_kind = self.dev.kind
+        rep.device = self.dev.name
         return out, rep
 
     def _fix_color(self, img: np.ndarray, s: Settings, rep: "Report") -> tuple[np.ndarray, Settings]:
@@ -1157,7 +1318,7 @@ class Enhancer:
                     pass
             t = (_to_tensor(face, self.dev, False) - 0.5) / 0.5
             try:
-                restored = _to_image(net(t, return_rgb=False)[0], -1.0, 1.0)
+                restored = _to_image(self._face_run(net, t), -1.0, 1.0)
                 ok_faces += 1
             except RuntimeError as e:  # lỗi model với mặt này: giữ mặt gốc (vẫn ghép lại để đủ danh sách mặt)
                 rep.notes.append(f"Mặt {n} lỗi khi xử lý ({e.__class__.__name__}), giữ nguyên")
@@ -1189,7 +1350,7 @@ class Enhancer:
                 if s.face_model != "restoreformer_pp" and weights.status("restoreformer_pp") == "ready":
                     try:
                         net2 = self._load_face_net("restoreformer_pp")
-                        heavy = _to_image(net2(t, return_rgb=False)[0], -1.0, 1.0)
+                        heavy = _to_image(self._face_run(net2, t), -1.0, 1.0)
                         if s.color_match:
                             heavy = match_color(heavy, face)
                     except (RuntimeError, OSError, weights.ModelError):

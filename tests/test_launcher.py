@@ -211,3 +211,36 @@ def test_offer_gpu_switch_keeps_models(server, tmp_path, monkeypatch):
     L2.run(launch=False)
     assert L2.state.get("flavor") == "xpu" and L2.state.get("models_ok") is True
     assert "xpu" in L2.state.get("gpu_asked")
+
+
+def test_recommend_flavor_legacy_nvidia():
+    r = bl.recommend_flavor
+    allf = {"cpu", "cuda", "cuda_old", "xpu"}
+    assert r(["NVIDIA GeForce GTX 1060 6GB"], True, allf) == ("cuda_old", "NVIDIA đời cũ")
+    assert r(["NVIDIA GeForce GTX 970"], True, allf)[0] == "cuda_old"
+    assert r(["NVIDIA GeForce MX250", "Intel(R) UHD Graphics 620"], True, allf)[0] == "cuda_old"
+    assert r(["NVIDIA GeForce GTX 1660 Ti"], True, allf)[0] == "cuda"  # Turing: bản thường
+    assert r(["NVIDIA GeForce RTX 5070"], True, allf)[0] == "cuda"
+    # có cả card cũ và card mới: theo card mới
+    assert r(["NVIDIA GeForce GTX 1050", "NVIDIA GeForce RTX 3060"], True, allf)[0] == "cuda"
+    # bản phát hành thiếu gói cuda_old: KHÔNG cài cuda (không chạy trên Pascal), dùng CPU
+    assert r(["NVIDIA GeForce GTX 1060 6GB"], True, {"cpu", "cuda"})[0] == "cpu"
+
+
+def test_offer_switch_cuda_to_cuda_old(server, tmp_path, monkeypatch):
+    base, H = server
+    monkeypatch.setenv("BEAUTYHDR_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("BEAUTYHDR_RETRY_SCALE", "0")
+    upd = publish(base, H, "1.0.0")
+    upd["flavors"]["cuda"] = upd["flavors"]["cpu"]
+    H.files["/update.json"] = json.dumps(upd).encode()
+    monkeypatch.setattr(bl, "adapter_names", lambda: ["NVIDIA GeForce GTX 1070"])
+    monkeypatch.setattr(bl, "has_nvidia", lambda: True)
+    L = bl.Launcher(UI(), update_url=base + "/update.json", flavor="cuda")  # bản cũ đã cài nhầm gói cuda
+    L.run(launch=False)
+    assert L.state.get("flavor") == "cuda"
+    upd["flavors"]["cuda_old"] = upd["flavors"]["cpu"]
+    H.files["/update.json"] = json.dumps(upd).encode()
+    L2 = bl.Launcher(UI(), update_url=base + "/update.json")
+    L2.run(launch=False)
+    assert L2.state.get("flavor") == "cuda_old" and L2.state.get("legacy_asked") is True

@@ -141,10 +141,6 @@ DA_DEP_THE_SET = PresetSet(
     author="Beauty HDR", note="Da sạch như ảnh thẻ mẫu: bớt mụn, đốm sạm, vết đỏ; đều màu, giữ vân da. Kèm tông mẫu Da đẹp ảnh thẻ.",
     id="da-dep-the", created="2026-11-25", builtin=True, look=LOOKS["da_dep_the"].to_dict())
 
-BUILTIN_SETS = (DEFAULT_SET, TRONG_SANG_SET, DA_DEP_THE_SET)
-BUILTIN_IDS = {s.id for s in BUILTIN_SETS}
-
-
 def builtin_sets() -> tuple[PresetSet, ...]:
     return BUILTIN_SETS
 
@@ -336,6 +332,27 @@ def safe_filename(name: str) -> str:
 
 # ----------------------------------------------------------------- thư viện bộ preset trên máy
 
+def _load_card_sets() -> tuple[PresetSet, ...]:
+    """4 bộ ảnh thẻ theo nhóm (nam/nữ × trẻ/lớn tuổi) nằm trong gói app: hiện sẵn ngay lần mở đầu, cập nhật cùng bản app."""
+    try:
+        got, _ = load_file(Path(__file__).with_name("du_lieu") / "anh-the-4-nhom.netanh.json")
+    except (OSError, UnicodeDecodeError, PresetError):
+        return ()
+    for s in got:
+        s.builtin = True
+    return tuple(got)
+
+
+CARD_SETS = _load_card_sets()
+BUILTIN_SETS = (DEFAULT_SET, TRONG_SANG_SET, DA_DEP_THE_SET) + CARD_SETS
+BUILTIN_IDS = {s.id for s in BUILTIN_SETS}
+
+
+def _same_content(a: PresetSet, b: PresetSet) -> bool:
+    """Cùng kiểu mặt và tông mẫu (bỏ qua mã, tên, ngày)."""
+    return a.to_dict()["styles"] == b.to_dict()["styles"] and (a.look or None) == (b.look or None)
+
+
 class Library:
     """Các bộ preset trên máy: bộ mặc định có sẵn (không sửa, không xoá) + bộ người dùng tạo hoặc nạp, mỗi bộ một file
     trong thư mục `presets`. Bộ đang dùng ghi ở file active.txt."""
@@ -346,6 +363,33 @@ class Library:
             root = data_dir() / "presets"
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self._migrate_builtin_copies()
+
+    def _migrate_builtin_copies(self) -> None:
+        """Trước 0.15.2 huy nạp tay 4 bộ ảnh thẻ nên trong thư mục có bản chép cùng mã với bộ có sẵn. Bản giống hệt bộ có
+        sẵn → xoá (khỏi trùng lặp); bản người dùng đã sửa → giữ, đổi mã và tên để không đè lên bộ có sẵn."""
+        by_id = {s.id: s for s in BUILTIN_SETS}
+        for p in sorted(self.root.glob(f"*{EXT}")):
+            sid = p.name[: -len(EXT)]
+            b = by_id.get(sid)
+            if b is None:
+                continue
+            try:
+                got, _ = load_file(p)
+            except (OSError, UnicodeDecodeError, PresetError):
+                continue
+            try:
+                if _same_content(got[0], b):
+                    p.unlink()
+                    if self.active_id() == sid:
+                        self.set_active(sid)  # vẫn là bộ có sẵn cùng mã
+                else:
+                    got[0].id = new_id()
+                    got[0].name = f"{got[0].name} (của bạn)"[:MAX_NAME]
+                    self.save(got[0])
+                    p.unlink()
+            except OSError:
+                continue
 
     def _path(self, sid: str) -> Path:
         return self.root / f"{sid}{EXT}"
@@ -393,7 +437,12 @@ class Library:
         have = self.sets()
         ids = {s.id for s in have}
         names = {s.name for s in have}
+        kept = []
         for s in got:
+            if any(_same_content(s, b) for b in CARD_SETS):
+                warn.append(f"“{s.name}” đã có sẵn trong app, không nạp lại")
+                continue
+            kept.append(s)
             if s.id in ids or s.id in BUILTIN_IDS:
                 s.id = new_id()
             base, n = s.name, 2
@@ -403,7 +452,7 @@ class Library:
             self.save(s)
             ids.add(s.id)
             names.add(s.name)
-        return got, warn
+        return kept, warn
 
     def export(self, sids: list[str], path: str | Path, app: str = "") -> Path:
         sets = [s for s in self.sets() if s.id in sids]

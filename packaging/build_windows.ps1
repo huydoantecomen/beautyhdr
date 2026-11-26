@@ -16,7 +16,7 @@
 # Chạy được trong đường dẫn có dấu tiếng Việt và dấu cách. Giữ file này ở dạng UTF-8 CÓ BOM: PowerShell 5.1 đọc
 # file không BOM theo bảng mã ANSI, chữ có dấu thành ký tự lạ và có thể làm hỏng cú pháp.
 param(
-    [ValidateSet("cpu", "cuda", "xpu")] [string]$Flavor = "cpu",
+    [ValidateSet("cpu", "cuda", "cuda_old", "xpu")] [string]$Flavor = "cpu",  # cuda_old: GTX 10 / 900 (CUDA 12.6)
     [switch]$NoModels,
     [switch]$NoInstaller,
     [string]$Python = "",  # ví dụ "py -3.12" hoặc "python"; để trống thì tự tìm
@@ -25,6 +25,8 @@ param(
 )
 if ($CapNhat) { $NoModels = $true; $NoInstaller = $true }
 $FlavorGiven = $PSBoundParameters.ContainsKey("Flavor")
+# Kiểm thử gọi script (packaging\cap_nhat.ps1, CI): chỉ in tham số đã nhận rồi thoát, không build
+if ($env:NETANH_KIEM_THAM_SO -eq "1") { Write-Host "THAMSO CapNhat=$CapNhat Flavor=$Flavor FlavorGiven=$FlavorGiven"; exit 0 }
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"  # PowerShell 5.1 tải file chậm hẳn khi vẽ thanh tiến độ
 $env:PYTHONUTF8 = "1"
@@ -35,10 +37,29 @@ $env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 if (-not $CapNhat -and -not $FlavorGiven -and $env:CI -ne "true") {
     $nv = $null
     try { $nv = Get-CimInstance Win32_VideoController -ErrorAction Stop | Where-Object { $_.Name -match "NVIDIA" } | Select-Object -First 1 } catch { }
+    # Kepler (GTX 600, GTX 760-780, GT 6xx/7xx, Quadro K): không bản PyTorch GPU nào còn chạy, dùng bản CPU
+    if ($nv -and $nv.Name -match "GTX\s*(6\d0|7[0-46-9]0)\b|\bGT\s*[4-7]\d0\b|GTX\s*TITAN(?!\s*X)|Quadro\s*K\d|Tesla\s*K\d") {
+        Write-Host "Card $($nv.Name) quá cũ cho AI trên GPU (đời Kepler): tạo bản CPU." -ForegroundColor Yellow
+        $nv = $null
+    }
     if ($nv) {
         Write-Host "Máy có card $($nv.Name). Bản GPU NVIDIA nhanh hơn khoảng 10 lần nhưng nặng hơn (khoảng 3 GB, bộ cài chia thành vài file)." -ForegroundColor Yellow
         $ans = Read-Host "Tạo bản GPU NVIDIA? Gõ Enter để chọn GPU, hoặc gõ C rồi Enter để chọn bản CPU"
-        $Flavor = if ($ans -match "^[cC]") { "cpu" } else { "cuda" }
+        # GTX 10 / 900, MX1xx–3xx (Pascal, Maxwell): PyTorch CUDA 12.8 trở lên bỏ các dòng này, dùng bản CUDA 12.6
+        $old = $nv.Name -match "GTX\s*(10[5-8]0|9[5-8]0|75\d)|MX\s*[1-3][1-5]0|GT\s*10[3-9]0|TITAN\s*X(p)?\b|Quadro\s*[PM]\d|Tesla\s*[PM]\d"
+        $Flavor = if ($ans -match "^[cC]") { "cpu" } elseif ($old) { "cuda_old" } else { "cuda" }
+    }
+}
+
+# Chọn bản GPU NVIDIA (kể cả CHUYEN_SANG_GPU.bat truyền -Flavor cuda) trên máy chỉ có card GTX 10 / 900: bản CUDA 12.8 không
+# chạy trên các dòng này, tự đổi sang bản cho card đời cũ (CUDA 12.6).
+if ($Flavor -eq "cuda" -and $env:CI -ne "true") {
+    $nvs = @()
+    try { $nvs = @(Get-CimInstance Win32_VideoController -ErrorAction Stop | Where-Object { $_.Name -match "NVIDIA" } | ForEach-Object { $_.Name }) } catch { }
+    $legacy = "GTX\s*(10[5-8]0|9[5-8]0|75\d)|MX\s*[1-3][1-5]0|GT\s*10[3-9]0|TITAN\s*X(p)?\b|Quadro\s*[PM]\d|Tesla\s*[PM]\d"
+    if ($nvs.Count -gt 0 -and @($nvs | Where-Object { $_ -notmatch $legacy }).Count -eq 0) {
+        Write-Host "Card $($nvs[0]) là đời cũ (Pascal/Maxwell): dùng bản GPU cho card đời cũ (PyTorch CUDA 12.6)." -ForegroundColor Yellow
+        $Flavor = "cuda_old"
     }
 }
 
@@ -189,6 +210,15 @@ function Find-Install {
     return $null
 }
 
+# Ghi nhớ thư mục mã nguồn này để lần sau CAP_NHAT.bat tự gợi ý (packaging\cap_nhat.ps1 đọc)
+function Save-SourceRoot {
+    try {
+        $f = Join-Path $env:LOCALAPPDATA "NetAnh\thu_muc_nguon.txt"
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $f) | Out-Null
+        Set-Content -LiteralPath $f -Value (Split-Path -Parent $Root) -Encoding UTF8
+    } catch { }
+}
+
 try {
     if ($CapNhat) {
         Step "0/6 Tìm Beauty HDR đã cài"
@@ -205,12 +235,14 @@ try {
             $cuda = @(Get-ChildItem -LiteralPath (Join-Path $AppDir "_internal\torch\lib") -Filter "*cuda*.dll" -ErrorAction SilentlyContinue).Count -gt 0
             $xpuDll = @(Get-ChildItem -LiteralPath (Join-Path $AppDir "_internal\torch\lib") -Filter "*sycl*.dll" -ErrorAction SilentlyContinue).Count -gt 0
             $Flavor = if ($cuda) { "cuda" } elseif ($xpuDll) { "xpu" } else { "cpu" }
+            $tv = Join-Path $AppDir "_internal\torch\version.py"
+            if ($cuda -and (Test-Path -LiteralPath $tv) -and ((Get-Content -LiteralPath $tv -Raw) -match "cuda\s*(:\s*\w+\s*)?=\s*'12\.6")) { $Flavor = "cuda_old" }
             $Venv = Join-Path $Work "venv-$Flavor"
         }
         Write-Host "Bản đã cài: $Flavor"
         if (-not (Test-Path -LiteralPath (Join-Path $Venv "Scripts\python.exe"))) {
             Write-Host "Không thấy môi trường build cũ ($Venv): phải tải lại thư viện (torch), lâu hơn. Model vẫn KHÔNG tải lại." -ForegroundColor Yellow
-            Write-Host "Muốn nhanh: đóng cửa sổ này, chép gói Cập nhật vào ĐÚNG thư mục chứa bản cũ (có thư mục ma-nguon\_build) rồi chạy lại." -ForegroundColor Yellow
+            Write-Host "Muốn nhanh: đóng cửa sổ này, bấm lại CAP_NHAT.bat và chọn thư mục bản cũ có thư mục ma-nguon\_build." -ForegroundColor Yellow
         }
     }
     New-Item -ItemType Directory -Force -Path $Work | Out-Null
@@ -233,7 +265,7 @@ try {
     }
 
     Step "2/6 Cài thư viện vào môi trường build riêng (_build\venv-$Flavor), không đụng tới Python đang dùng"
-    $TorchIndex = switch ($Flavor) { "cuda" { "https://download.pytorch.org/whl/cu128" } "xpu" { "https://download.pytorch.org/whl/xpu" } default { "https://download.pytorch.org/whl/cpu" } }
+    $TorchIndex = switch ($Flavor) { "cuda" { "https://download.pytorch.org/whl/cu128" } "cuda_old" { "https://download.pytorch.org/whl/cu126" } "xpu" { "https://download.pytorch.org/whl/xpu" } default { "https://download.pytorch.org/whl/cpu" } }
     $keepTorch = $false
     if ($CapNhat) {
         & $Py (Join-Path $Root "packaging\kiem_torch.py")
@@ -258,6 +290,11 @@ try {
     Step "3/6 Đóng gói bằng PyInstaller"
     Exec $Py @("-m", "PyInstaller", "--noconfirm", "--clean", "--workpath", (Join-Path $Work "pyinstaller-$Flavor"),
                "--distpath", $DistRoot, "packaging\net_anh.spec")
+    # bộ preset mẫu (ảnh thẻ 4 nhóm) nằm cạnh NetAnh.exe: Quản lý… > Nạp từ file… > thư mục presets
+    $presetSrc = Join-Path $Root "presets"
+    if (Test-Path -LiteralPath $presetSrc) {
+        Copy-Item -LiteralPath $presetSrc -Destination (Join-Path $Dist "presets") -Recurse -Force
+    }
 
     if (-not $NoModels) {
         Step "4/6 Tải model AI (khoảng 620 MB, kiểm SHA-256; lần sau dùng lại bản đã tải)"
@@ -299,6 +336,7 @@ try {
         if (Test-Path -LiteralPath $Log2) { Get-Content -LiteralPath $Log2 -Encoding UTF8 | ForEach-Object { Write-Host $_ } }
         if ($pr.ExitCode -ne 0) { throw "Đã chép bản $Version nhưng tự kiểm KHÔNG ĐẠT (mã $($pr.ExitCode)), xem $Log2" }
         Write-Host ""
+        Save-SourceRoot
         Write-Host "XONG. Beauty HDR đã lên bản $Version, model giữ nguyên. Mở Beauty HDR từ menu Start như mọi khi." -ForegroundColor Green
         Write-Host "Thư mục _build giữ lại để lần cập nhật sau nhanh; đừng xoá." -ForegroundColor Green
         exit 0
@@ -336,7 +374,8 @@ try {
     Write-Host ""
     Write-Host "XONG. File cài đặt: $Final" -ForegroundColor Green
     if (-not $NoInstaller) {
-        Write-Host "Bấm đúp file đó để cài Beauty HDR, sau đó mở Beauty HDR từ menu Start. Thư mục _build chỉ chứa file tạm, xoá được." -ForegroundColor Green
+        Save-SourceRoot
+        Write-Host "Bấm đúp file đó để cài Beauty HDR, sau đó mở Beauty HDR từ menu Start. Giữ thư mục này (có _build): lần sau gói Cập nhật dùng lại, khỏi tải lại thư viện." -ForegroundColor Green
     }
     if ($env:CI -ne "true") { Start-Process -FilePath "explorer.exe" -ArgumentList "/select,`"$Final`"" }
     exit 0

@@ -1,7 +1,8 @@
 """Chế độ, preset và thông số chỉnh tay (đặc tả mục 6, 15)."""
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+import json
+from dataclasses import asdict, dataclass, fields, replace
 
 MODES = {
     "quick": "Cải thiện nhanh",
@@ -37,7 +38,7 @@ class Settings:
     # (tools/param_sweep.py) cho IDS/SSIM cao nhất, giữ tuổi và vân da sát ảnh gốc ở cả 6 nhóm tuổi.
     fidelity: float = 0.7
     max_faces: int = 24  # ảnh nhóm: mặt nào không qua model mặt thì bị mạng nền vẽ thành mặt nạ (đo trên ảnh đội bóng 21 mặt)
-    tile: int = 400
+    tile: int = -1  # cạnh ô cắt ảnh cho mạng nền: −1 = tự động (GPU theo bộ nhớ còn trống, CPU 400), 0 = không cắt
     color_match: bool = True
     face_model: str = "gfpgan"  # "gfpgan" (GFPGAN 1.4) | "restoreformer" (RestoreFormer, chi tiết mạnh hơn)
     protect_faces: bool = True
@@ -87,6 +88,10 @@ class Settings:
     # Mặt nhỏ (hai mắt cách < 32 px): True = phóng AI vùng mặt rồi mới căn và dựng, ít bịa mắt xanh, tóc vàng hơn nhưng
     # ít nét hơn; False = như 0.10. Chưa bật mặc định: huy ưa bản dựng nhiều AI hơn bản giới hạn AI, chờ chấm vòng 2.
     small_face_sr: bool = False
+    # Ảnh cũ chụp cảnh (không phải ảnh thẻ nền đồng màu, không phải ảnh đen trắng): 0..1 nâng tông sặc sỡ hơn (độ rực,
+    # tương phản tông giữa), da được giữ ít đổi. Chỉ chạy khi bật khôi phục ảnh cũ. 0 = tắt (mặc định).
+    scene_vivid: float = 0.0
+    scene_ai: float = 0.0          # 0..1: ảnh cảnh cũ lấy màu từ AI tô màu DDColor (cần scene_vivid > 0, tải 912 MB)
     # Đường dẫn PNG mặt nạ vùng hỏng nặng do người dùng tô (trắng = hỏng): vá bằng LaMa rồi, nếu trúng mặt, dựng lại
     # mặt đó 100 % bằng model mặt trong vùng hỏng (nút "Vẽ vùng hỏng…", CLI --mask).
     damage_mask: str = ""
@@ -116,11 +121,91 @@ class Settings:
     def ai_weight(self) -> float:
         return 1.0 - self.fidelity
 
+    def with_(self, **kw) -> "Settings":
+        return replace(self, **kw)
+
     def to_dict(self) -> dict:
         return asdict(self)
 
-    def with_(self, **kw) -> "Settings":
-        return replace(self, **kw)
+    @classmethod
+    def from_dict(cls, d: dict, warn: list[str] | None = None) -> "Settings":
+        """Settings từ dict lạ (máy khác gửi qua API, file): chỉ nhận trường đã biết, đúng kiểu, số kẹp vào khoảng
+        hợp lý; sai thì bỏ (dùng mặc định) và ghi vào `warn`. Không bao giờ nhận đường dẫn file (damage_mask)."""
+        warn = [] if warn is None else warn
+        if not isinstance(d, dict):
+            raise ValueError("thông số phải là JSON object")
+        kw: dict = {}
+        for f in fields(cls):
+            if f.name not in d or f.name in _NO_REMOTE:
+                continue
+            v, default = d[f.name], getattr(cls, f.name, None)
+            ok = _check_field(f.name, v, default)
+            if ok is _BAD:
+                warn.append(f"bỏ {f.name}={str(v)[:40]}")
+            else:
+                kw[f.name] = ok
+        for k in d:
+            if k not in _FIELD_NAMES:
+                warn.append(f"bỏ khoá lạ {str(k)[:40]}")
+        return cls(**kw)
+
+
+_BAD = object()
+_FIELD_NAMES = {f.name for f in fields(Settings)}
+_NO_REMOTE = {"damage_mask", "tile"}  # đường dẫn trên máy gửi; ô cắt ảnh theo card của máy chạy
+_CHOICES = {"mode": set(MODES), "face_model": {"gfpgan", "restoreformer", "restoreformer_pp"},
+            "sr_model": {"compact", "rrdb", "plksr", "dat2"},
+            "fade_style": {"giu_da", "0.10"}}
+_NUM_RANGE = {"upscale": (0, 4), "max_faces": (0, 64), "denoise": (-1.0, 10.0), "deblur": (-1.0, 4.0),
+              "brightness": (-1.0, 1.0), "wb": (-1.0, 1.0), "skin_tone": (-1.0, 1.0)}
+
+
+def _check_field(name: str, v, default):
+    """Giá trị hợp lệ (đã kẹp) hoặc _BAD."""
+    import math
+    if name in ("face_styles", "look"):
+        if v is None:
+            return None
+        if not isinstance(v, dict) or len(json.dumps(v)) > 8192:
+            return _BAD
+        try:
+            if name == "face_styles":
+                from .facestyle import parse_set
+                return {k: st.to_dict() for k, st in parse_set({"name": "x", "styles": v}, []).styles.items()}
+            from .look import Look
+            return asdict(Look.from_dict(v))
+        except Exception:
+            return _BAD
+    if name == "bg_color":
+        if v is None:
+            return None
+        if isinstance(v, (list, tuple)) and len(v) == 3 and all(isinstance(c, int) and 0 <= c <= 255 for c in v):
+            return tuple(v)
+        return _BAD
+    if name in ("detail_fidelity", "sr_denoise"):
+        if v is None:
+            return None
+        default = 0.0
+    if isinstance(default, bool):
+        return v if isinstance(v, bool) else _BAD
+    if isinstance(default, (int, float)):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            return _BAD
+        lo, hi = _NUM_RANGE.get(name, (0.0, 1.0))
+        v = min(hi, max(lo, v))
+        if isinstance(default, int):
+            v = int(round(v))
+            if name == "upscale" and v == 3:
+                v = 4
+        return v
+    if isinstance(default, str):
+        if not isinstance(v, str) or len(v) > 40:
+            return _BAD
+        if name in _CHOICES and v not in _CHOICES[name]:
+            return _BAD
+        return v
+    return _BAD
+
 
 
 # Preset: chỉ những trường khác mặc định. "auto" do bộ phân tích quyết định.

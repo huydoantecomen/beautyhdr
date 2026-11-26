@@ -1,0 +1,82 @@
+{
+  "format": "net-anh-preset-set",
+  "version": 3,
+  "app": "Beauty HDR 0.14.1",
+  "sets": [
+    {
+      "id": "anh-the-nu-tre",
+      "name": "Ảnh thẻ · Nữ trẻ",
+      "author": "Beauty HDR",
+      "note": "Ảnh thẻ nữ 18–40: da sáng trong, sạch mụn đốm, môi hồng, tóc đen, nền phẳng. Gần Da đẹp ảnh thẻ, bớt làm sáng ảnh tối.",
+      "created": "2026-11-26",
+      "styles": {
+        "child": {
+          "keep": 0.0,
+          "detail": 0.3,
+          "smooth": 0.6,
+          "glow": 0.2,
+          "bright": 0.3,
+          "warm": 0.05,
+          "matte": 0.3
+        },
+        "man": {
+          "keep": 0.0,
+          "detail": 0.3,
+          "smooth": 0.6,
+          "glow": 0.2,
+          "bright": 0.3,
+          "warm": 0.05,
+          "matte": 0.3
+        },
+        "woman": {
+          "keep": 0.0,
+          "detail": 0.3,
+          "smooth": 0.6,
+          "glow": 0.2,
+          "bright": 0.3,
+          "warm": 0.05,
+          "matte": 0.3
+        },
+        "elder": {
+          "keep": 0.0,
+          "detail": 0.3,
+          "smooth": 0.6,
+          "glow": 0.2,
+          "bright": 0.3,
+          "warm": 0.05,
+          "matte": 0.3
+        },
+        "adult": {
+          "keep": 0.0,
+          "detail": 0.3,
+          "smooth": 0.6,
+          "glow": 0.2,
+          "bright": 0.3,
+          "warm": 0.05,
+          "matte": 0.3
+        }
+      },
+      "look": {
+        "name": "Ảnh thẻ nữ trẻ",
+        "skin_L": 75.0,
+        "skin_a": 10.5,
+        "skin_b": 13.0,
+        "skin": 0.8,
+        "skin_light": 0.75,
+        "even": 0.7,
+        "clean": 0.8,
+        "tidy": 0.6,
+        "lips_a": 33.0,
+        "lips_b": 16.0,
+        "lips": 0.55,
+        "hair": 0.5,
+        "white": 0.7,
+        "cool": 1.5,
+        "contrast": 0.6,
+        "range_target": 88.0,
+        "bg_clean": 0.9,
+        "bg_lift": 3.0
+      }
+    }
+  ]
+}

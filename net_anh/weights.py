@@ -112,6 +112,12 @@ MANIFEST: dict[str, ModelInfo] = {m.model_id: m for m in [
               "https://github.com/microsoft/Bringing-Old-Photos-Back-to-Life/releases/download/v1.0/global_checkpoints.zip",
               "Dò vết xước, nếp gãy, vết nhăn màng bọc (U-Net)", "1×1×H×W xám [-1, 1], cạnh chia hết 16", "Dò xước",
               zip_member="checkpoints/detection/FT_Epoch_latest.pt"),
+    # DDColor (Kang và cộng sự, ICCV 2023), Apache-2.0: đoán màu theo ngữ nghĩa cho ảnh cảnh cũ (restore.scene_ai_color).
+    ModelInfo("ddcolor", "ddcolor_modelscope.pth", "ddcolor_modelscope", 911914869,
+              "d81711971ec59200da26d5e8a1afae8dd3778d495ea8ad7a7dadc769f403f7e7", "Apache-2.0, Kang và cộng sự",
+              "https://huggingface.co/piddnad/ddcolor_modelscope/resolve/main/pytorch_model.bin",
+              "Tô màu AI cho ảnh cảnh cũ (nâng màu sặc sỡ)", "1×3×512×512 RGB [0,1] (xám) → a, b của Lab",
+              "DDColor"),
 ]}
 
 

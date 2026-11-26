@@ -71,6 +71,10 @@ def build_settings(a, eng: Enhancer | None, img) -> tuple[Settings, str]:
         if not (s.repair > 0 or s.fade > 0):
             s = s.with_(repair=1.0, fade=1.0, auto_rotate=True)
     s = s.with_(fade_style=getattr(a, "fade_style", "giu_da"))
+    if getattr(a, "scene_vivid", None):
+        s = s.with_(scene_vivid=a.scene_vivid)
+    if getattr(a, "scene_ai", None):
+        s = s.with_(scene_ai=a.scene_ai)
     if getattr(a, "small_face_sr", False):
         s = s.with_(small_face_sr=True)
     if a.low_light:
@@ -142,10 +146,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-faces", type=int, default=24)
     p.add_argument("--fade-style", choices=["0.10", "giu_da"], default="giu_da",
                    help="phục hồi màu phai: giu_da (mặc định, giữ màu da và ánh sáng ấm có chủ ý) hoặc 0.10 (bản cũ)")
+    p.add_argument("--scene-vivid", type=float,
+                   help="ảnh cũ chụp cảnh (không phải ảnh thẻ nền đồng màu, không phải đen trắng): nâng tông sặc sỡ 0..1; "
+                        "chạy cùng bước khôi phục ảnh cũ")
+    p.add_argument("--scene-ai", type=float,
+                   help="cùng --scene-vivid: lấy màu từ AI tô màu DDColor 0..1 (tải 912 MB lần đầu)")
     p.add_argument("--small-face-sr", action="store_true",
                    help="mặt nhỏ trong ảnh nhóm: phóng AI vùng mặt trước khi dựng (thử nghiệm, ít bịa hơn nhưng ít nét)")
-    p.add_argument("--tile", type=int, default=400, help="kích thước ô Real-ESRGAN, 0 = không chia")
+    p.add_argument("--tile", type=int, default=-1, help="cạnh ô cắt ảnh cho mạng nền: -1 = tự động theo bộ nhớ GPU (mặc định), 0 = không chia")
     p.add_argument("--device", choices=["auto", "gpu", "cpu"], default="auto")
+    p.add_argument("--parallel", "--song-song", type=int, default=0,
+                   help="số ảnh xử lý song song khi làm thư mục: 0 = tự động (2 trên GPU từ 11 GB VRAM, còn lại 1)")
     p.add_argument("--format", choices=["jpg", "png", "webp"], default="jpg")
     p.add_argument("--quality", type=int, default=94)
     p.add_argument("--ai-lips", action="store_true", help="để model mặt vẽ lại môi (mặc định giữ dáng, màu môi gốc)")
@@ -193,13 +204,31 @@ def main(argv: list[str] | None = None) -> int:
         jobs = [(src, out)]
 
     eng = Enhancer(a.device, progress=lambda m: print("  " + m, file=sys.stderr))
-    print(f"Thiết bị: {eng.dev.name}", file=sys.stderr)
-    failed = 0
+    fam = eng.dev.family
+    print(f"Thiết bị: {eng.dev.name}" + (f" · dòng {fam.label} · kiểu số thử {' → '.join(fam.precisions)} · hỗ trợ {fam.support}"
+                                         if eng.dev.kind != "cpu" else ""), file=sys.stderr)
+    from .device import UNSUPPORTED
+    for name, why in UNSUPPORTED:
+        print(f"  Cảnh báo: {name}: {why}", file=sys.stderr)
+    from .batch import BatchRunner, extra_engines, workers_for
+    import threading
+
+    n = 1 if len(jobs) < 2 else (a.parallel if a.parallel > 0 else workers_for(eng))
+    engines = extra_engines(eng, n, lambda: Enhancer(a.device, progress=lambda m: None if m.rstrip().endswith("%")
+                                                     else print("  " + m, file=sys.stderr)))
+    if n > 1:
+        print(f"  Xử lý {n} ảnh song song (mỗi luồng nạp model một lần)", file=sys.stderr)
+    failed = [0]
     tally = BatchTally(len(jobs))
-    for i, (f, out) in enumerate(jobs, 1):
+    runner = BatchRunner(engines, lambda job: load_image(job[0]))
+    warned = threading.Event()
+
+    def one(e: Enhancer, lo) -> None:
+        f, out = lo.item
+        i = lo.index + 1
         try:
-            img = load_image(f)
-            s, note = build_settings(a, eng, img)
+            img = lo.get()
+            s, note = build_settings(a, e, img)
             if note:
                 print("  " + note, file=sys.stderr)
             if a.phone == "auto":
@@ -209,21 +238,40 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  Máy chụp: {desc} → bộ lọc {PROFILES[key].label}", file=sys.stderr)
             else:
                 s = s.with_(phone=a.phone)
-            if i == 1 and s.mode not in ("quick", "manual"):  # cảnh báo theo cấu hình máy, không chặn
-                for msg in hw_warnings(s, img, eng):
+            if not warned.is_set() and s.mode not in ("quick", "manual"):  # cảnh báo theo cấu hình máy, không chặn
+                warned.set()
+                for msg in hw_warnings(s, img, e):
                     print("  Cảnh báo: " + msg, file=sys.stderr)
-            res, rep = eng.process(img, s)
-            save_image(resize_long(res, OUT_SIZES[a.size]), out, a.quality)
-            tally.add(rep, f.name)
-            print(f"[{i}/{len(jobs)}] {f.name} → {out}  ({rep.summary()})")
-        except ImageError as e:
-            failed += 1
-            tally.fail()
-            print(f"[{i}/{len(jobs)}] {f.name}: {e}", file=sys.stderr)
-        except Exception as e:  # một ảnh lỗi không dừng cả lô
-            failed += 1
-            tally.fail()
-            print(f"[{i}/{len(jobs)}] {f.name}: LỖI {e}", file=sys.stderr)
+            res, rep = e.process(img, s)
+        except ImageError as ex:
+            with runner.lock:
+                failed[0] += 1
+                tally.fail()
+            print(f"[{i}/{len(jobs)}] {f.name}: {ex}", file=sys.stderr)
+            return
+        except Exception as ex:  # một ảnh lỗi không dừng cả lô
+            with runner.lock:
+                failed[0] += 1
+                tally.fail()
+            print(f"[{i}/{len(jobs)}] {f.name}: LỖI {ex}", file=sys.stderr)
+            return
+
+        def save() -> None:
+            try:
+                save_image(resize_long(res, OUT_SIZES[a.size]), out, a.quality)
+                with runner.lock:
+                    tally.add(rep, f.name)
+                print(f"[{i}/{len(jobs)}] {f.name} → {out}  ({rep.summary()})")
+            except Exception as ex:
+                with runner.lock:
+                    failed[0] += 1
+                    tally.fail()
+                print(f"[{i}/{len(jobs)}] {f.name}: LỖI ghi file {ex}", file=sys.stderr)
+
+        runner.later(save)
+
+    runner.run(jobs, one)
+    failed = failed[0]
     if len(jobs) > 1 or tally.needs_attention:
         print("Tổng kết: " + tally.summary(), file=sys.stderr)
     return 1 if failed else 0

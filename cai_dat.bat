@@ -10,8 +10,12 @@ call .venv\Scripts\activate.bat
 python -m pip install --upgrade pip
 where nvidia-smi >nul 2>nul
 if %errorlevel%==0 (
-  echo Tim thay GPU NVIDIA: cai PyTorch ban CUDA...
-  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128 || pip install torch torchvision
+  set "CUIDX=cu128"
+  for /f "tokens=1 delims=." %%c in ('nvidia-smi --query-gpu^=compute_cap --format^=csv^,noheader 2^>nul') do (
+    if %%c LSS 7 set "CUIDX=cu126"
+  )
+  call echo Tim thay GPU NVIDIA: cai PyTorch ban CUDA %%CUIDX%% - cu126 cho GTX 10 va GTX 900...
+  call pip install torch torchvision --index-url https://download.pytorch.org/whl/%%CUIDX%% || pip install torch torchvision
 ) else (
   echo Khong thay GPU NVIDIA: cai PyTorch ban CPU.
   pip install torch torchvision

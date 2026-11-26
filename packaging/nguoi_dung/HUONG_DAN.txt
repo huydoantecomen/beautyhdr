@@ -16,3 +16,8 @@ chụp màn hình gửi lại.
 Model chất lượng cao nhất (RestoreFormer++, DAT-2, khoảng 430 MB) không nằm trong file cài: app tự tải
 khi chọn mức nét 6 hoặc khi bấm tải trong Quản lý model. Máy không có GPU NVIDIA vẫn chạy được, chỉ
 chậm hơn nhiều; app báo thời gian ước tính trước khi chạy.
+
+Card đồ hoạ: app tự nhận dòng card (GTX 10/16, RTX 20/30/40/50, Intel Arc...) và bộ nhớ, tự chọn cách chạy
+nhanh nhất mà ảnh vẫn đúng. Xem trong Xuất và thiết bị → Khuyến nghị theo card. Máy GTX 10 (1050, 1060,
+1070, 1080) hoặc GTX 900: khi file cài hỏi, chọn bản GPU; nếu tạo bằng TAO_FILE_CAI_DAT.bat thì script
+tự chọn bản cho card đời cũ. Muốn giúp tinh chỉnh: Trợ giúp → Đo tốc độ card, gửi file .txt ngoài Desktop.
