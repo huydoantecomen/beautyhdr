@@ -927,7 +927,8 @@ def test_preset_file_roundtrip_and_validation(tmp_path):
 def test_preset_library_import_export(tmp_path):
     from net_anh import facestyle as fs
     lib = fs.Library(tmp_path / "lib")
-    assert [s.id for s in lib.sets()] == ["default", "trong-sang", "da-dep-the"] and lib.active().builtin
+    assert [s.id for s in lib.sets()] == ["default", "trong-sang", "da-dep-the", "anh-the-nam-tre", "anh-the-nu-tre",
+                                          "anh-the-nam-gia", "anh-the-nu-gia"] and lib.active().builtin
     with pytest.raises(fs.PresetError):
         lib.save(fs.DEFAULT_SET)
     mine = fs.DEFAULT_SET.copy("Của tôi")
@@ -1087,6 +1088,23 @@ def test_backdrop_replaces_uniform_background_only():
         assert np.abs(out[y, x].astype(int) - img[y, x]).max() <= 3
     a = backdrop.alpha_matte(img, bd)
     assert 0.2 < a.mean() < 0.8 and a[140, 120] > 0.99 and a[10, 10] < 0.01
+
+
+def test_backdrop_soft_edge_at_any_scale_and_no_eaten_clothes():
+    """0.15.2: mép mềm kể cả khi ảnh đã phóng 2×; áo gần màu phông (có biên rõ) không bị coi là nền."""
+    from net_anh import backdrop
+    img = _id_photo(h=300, w=240, bg=(200, 140, 60))
+    big = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    a = backdrop.alpha_matte(big, backdrop.detect(big))
+    band = ((a > 0.05) & (a < 0.95)).sum() / max(1, (a > 0.5).sum() ** 0.5)
+    assert band > 3.0  # có dải chuyển mềm quanh mép (không phải mặt nạ nhị phân)
+    # áo xanh gần phông (ΔE nhỏ) nhưng khác rõ → vẫn là người
+    c = img.copy()
+    c[240:, 40:200] = (178, 118, 50)
+    c = cv2.GaussianBlur(c, (0, 0), 1.0)
+    bd = backdrop.detect(c)
+    a2 = backdrop.alpha_matte(c, bd)
+    assert a2[270, 100] > 0.95 and a2[10, 10] < 0.01
 
 
 def test_backdrop_refuses_non_uniform_background():

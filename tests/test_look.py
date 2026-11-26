@@ -1,5 +1,6 @@
 """PC 0.14.0: tông mẫu (look.py) – bộ preset Trong sáng theo ảnh mẫu của huy."""
 import json
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -106,13 +107,13 @@ def test_preset_file_v3_carries_look_and_old_reader_paths():
 
 def test_library_lists_builtin_look_and_imported(tmp_path):
     lib = fs.Library(tmp_path / "lib")
-    assert [s.id for s in lib.looks()] == ["trong-sang", "da-dep-the"]
+    assert [s.id for s in lib.looks()] == ["trong-sang", "da-dep-the", *CARD_IDS]
     with pytest.raises(fs.PresetError):
         lib.delete("trong-sang")
     lib.export(["trong-sang"], tmp_path / "ts.netanh.json")
     other = fs.Library(tmp_path / "other")
     got, _ = other.import_file(tmp_path / "ts.netanh.json")
-    assert got[0].look == fs.TRONG_SANG_SET.look and len(other.looks()) == 3
+    assert got[0].look == fs.TRONG_SANG_SET.look and len(other.looks()) == 7
 
 
 def test_defaults_unchanged():
@@ -200,3 +201,52 @@ def test_clean_backdrop_skips_textured_background():
                   + rng.normal(0, 2, (h, w, 3)), 0, 255).astype(np.uint8)
     cv2.ellipse(sky, (350, 650), (160, 300), 0, 0, 360, (120, 140, 170), -1)
     assert look.clean_backdrop(sky, 0.9, 3.0, None)[1]  # phông trơn vẫn được làm phẳng
+
+
+# ---------- 0.15.2: 4 bộ preset ảnh thẻ có sẵn trong app ----------
+
+CARD_IDS = ("anh-the-nam-tre", "anh-the-nu-tre", "anh-the-nam-gia", "anh-the-nu-gia")
+
+
+def test_card_presets_builtin_on_first_open(tmp_path):
+    from net_anh import facestyle
+    lib = facestyle.Library(tmp_path / "p")
+    ids = [s.id for s in lib.sets()]
+    for sid in CARD_IDS:
+        assert ids.count(sid) == 1
+    assert all(lib.get(sid).builtin and lib.get(sid).look for sid in CARD_IDS)
+    assert {s.id for s in lib.looks()} >= set(CARD_IDS)  # hiện ở ô Tông màu / Tông mẫu
+    with pytest.raises(facestyle.PresetError):
+        lib.save(lib.get(CARD_IDS[0]))  # không sửa đè bộ có sẵn
+
+
+def test_card_presets_no_duplicates_after_manual_load_and_updates(tmp_path):
+    from net_anh import facestyle
+    root = tmp_path / "p"
+    src = Path(__file__).resolve().parents[1] / "presets" / "anh-the-4-nhom.netanh.json"
+    lib = facestyle.Library(root)
+    got, warn = lib.import_file(src)  # nạp tay file cũ: đã có sẵn nên không nạp lại
+    assert got == [] and len(warn) == 4
+    # thư mục còn bản chép nạp tay từ bản cũ: giống hệt thì dọn, đã sửa thì giữ dưới mã mới
+    sets, _ = facestyle.load_file(src)
+    same, edited = sets[0], sets[1]
+    facestyle.save_file([same], root / f"{same.id}{facestyle.EXT}")
+    edited.styles["man"] = facestyle.FaceStyle(smooth=0.9)
+    facestyle.save_file([edited], root / f"{edited.id}{facestyle.EXT}")
+    mine = facestyle.PresetSet("Của tôi", {"adult": facestyle.FaceStyle(smooth=0.1)}, id="mine")
+    lib.save(mine)
+    for _ in range(3):  # mở app nhiều lần / cập nhật nhiều lần
+        lib = facestyle.Library(root)
+        ids = [s.id for s in lib.sets()]
+        assert len(ids) == len(set(ids))
+        assert all(ids.count(sid) == 1 for sid in CARD_IDS)
+    names = [s.name for s in lib.sets()]
+    assert "Của tôi" in names and any(n.endswith("(của bạn)") for n in names)
+    assert sum(1 for s in lib.sets() if s.name == same.name) == 1
+    assert lib.get("mine").styles["adult"].smooth == pytest.approx(0.1)  # bộ do người dùng tạo không bị đụng
+
+
+def test_card_presets_survive_missing_file(monkeypatch):
+    from net_anh import facestyle
+    monkeypatch.setattr(facestyle, "load_file", lambda p: (_ for _ in ()).throw(OSError("x")))
+    assert facestyle._load_card_sets() == ()

@@ -2330,7 +2330,7 @@ class MainWindow(QMainWindow):
             self.preset_lib.set_active(got[0].id)
         self._fill_preset_sets()
         self._fill_looks()
-        msg = "Đã nạp và chọn: " + ", ".join(st.name for st in got)
+        msg = ("Đã nạp và chọn: " + ", ".join(st.name for st in got)) if got else "Không có bộ mới để nạp."
         if warn:
             msg += "\n\nĐã tự sửa:\n" + "\n".join(warn[:12])
         QMessageBox.information(self, APP_NAME, msg)

@@ -1,6 +1,13 @@
-BEAUTY HDR 0.16.0: GÓI CẬP NHẬT (nhỏ, không tải lại model)
+BEAUTY HDR 0.16.1: GÓI CẬP NHẬT (nhỏ, không tải lại model)
 
-MỚI Ở BẢN 0.16.0: ĐƯA TÍNH NĂNG CÒN THIẾU VÀO SẴN
+MỚI Ở BẢN 0.16.1: GỘP 0.15.2 VÀO 0.16.0
+
+- Đổi nền: viền tóc, tay áo, vai không còn răng cưa, lẹm, mất sợi tóc hay viền xanh sẫm; mép mềm tự nhiên ở cả ảnh phóng 2×/4×.
+  Áo gần màu phông không bị xoá nữa.
+- 4 bộ preset ảnh thẻ (Nam trẻ, Nữ trẻ, Nam lớn tuổi, Nữ lớn tuổi) có sẵn trong app, không cần Nạp từ file nữa:
+  chọn ở ô Preset theo đối tượng (Chuyên sâu) hoặc ô Tông màu (Đơn giản).
+
+CÓ TỪ BẢN 0.16.0: ĐƯA TÍNH NĂNG CÒN THIẾU VÀO SẴN
 
 - Chế độ Đơn giản, loại "Ảnh cũ": thêm hai ô "Nâng màu cảnh (ảnh cũ chụp cảnh)" và "Tô màu AI cho cảnh".
   Cả hai tắt sẵn. Tô màu AI hỏi trước khi tải model DDColor (khoảng 912 MB, một lần). Khử bóng loáng da vẫn ở
@@ -45,7 +52,7 @@ model đã tải nằm trong thư mục cài đặt và được giữ nguyên.
 
 CÁCH LÀM (từ 0.15.1 không phải chép gói vào đúng thư mục nữa)
 
-1. Giải nén file BeautyHDR-0.16.0-CapNhat.zip ra chỗ nào cũng được (ví dụ Desktop).
+1. Giải nén file BeautyHDR-0.16.1-CapNhat.zip ra chỗ nào cũng được (ví dụ Desktop).
 2. Đóng Beauty HDR (và cửa sổ "Máy chủ cho điện thoại" nếu đang mở).
 3. Mở thư mục vừa giải nén, bấm đúp CAP_NHAT.bat.
 4. App tự tìm bản cũ trên máy và hỏi: "Tìm thấy Beauty HDR 0.x ở ... Cập nhật thư mục này?"
@@ -58,7 +65,7 @@ CÁCH LÀM (từ 0.15.1 không phải chép gói vào đúng thư mục nữa)
 5. App ghi đè mã mới vào thư mục đó, GIỮ NGUYÊN: thư viện đã tải (ma-nguon\_build, có torch), model, lịch sử và
    preset. Rồi cửa sổ đen tự đóng gói lại chương trình (khoảng 5-10 phút), chép đè lên chỗ đã cài
    (%LOCALAPPDATA%\Programs\NetAnh) và chạy thử bằng model có sẵn. Hiện chữ XONG màu xanh là được.
-6. Mở "Beauty HDR" từ menu Start như mọi khi. Menu Trợ giúp > Giới thiệu phải ghi PC 0.16.0.
+6. Mở "Beauty HDR" từ menu Start như mọi khi. Menu Trợ giúp > Giới thiệu phải ghi PC 0.16.1.
 
 HAI KIỂU CÀI, APP TỰ NHẬN
 - Đã cài bằng file setup.exe: đóng gói lại và chép đè bản đã cài (như mô tả ở trên).
