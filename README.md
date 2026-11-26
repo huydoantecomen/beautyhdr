@@ -156,6 +156,16 @@ App Android bật **Chất lượng cao nhất** thì gửi ảnh tới PC này 
 có thì điện thoại tự xử lý trên máy. Mở **Beauty HDR - Máy chủ cho điện thoại** (menu Start), `may_chu.bat` hoặc
 `python -m net_anh.server`. Cài đặt, ghép nối, dùng ở ngoài qua Tailscale, API: [docs/MAY_CHU.md](docs/MAY_CHU.md).
 
+## Thay đổi ở 0.16.0 (cổng kết nối API xử lý ảnh ngoài)
+
+- Máy chủ cho điện thoại nhận thêm nguồn xử lý ngoài: fal.ai Clarity, Stability AI Upscale (Conservative, Fast),
+  Replicate (model tự chọn). Khoá API chỉ đặt trên máy chủ (biến môi trường hoặc `~/.net_anh/providers.json`), app chọn
+  bằng `engine=<id>` và phải gửi `consent=1` sau khi hỏi người dùng.
+- Kết quả từ API ngoài được kiểm giữ khuôn mặt bằng ArcFace; mặt bị đổi (IDS < 0,70) hoặc API lỗi, hết credit thì máy
+  chủ tự xử lý bằng pipeline của máy này và ghi lý do vào báo cáo. Ảnh gửi đi bỏ sạch EXIF.
+- Thử nhanh không cần máy chủ: `python -m net_anh.providers anh.jpg --engine fal-clarity`. Chi tiết:
+  [docs/API_NGOAI.md](docs/API_NGOAI.md).
+
 ## Thay đổi ở 0.15.0 (tối ưu theo dòng card đồ hoạ)
 
 - Tự nhận dòng card và bộ nhớ (`net_anh/gpu_profile.py`): NVIDIA theo thế hệ chip đọc từ driver (GTX 900, GTX 10, GTX 16,
