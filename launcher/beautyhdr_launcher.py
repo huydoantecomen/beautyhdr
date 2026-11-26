@@ -234,14 +234,17 @@ class Launcher:
         flavor, vendor = recommend_flavor(adapter_names(), has_nvidia(), avail)
         if flavor == "cuda":
             ok = self.ui.ask("Máy có card NVIDIA",
-                             "Cài bản GPU NVIDIA (nhanh hơn khoảng 10 lần, nặng hơn khoảng 3 GB, chạy được cả bằng CPU)?\n"
-                             "Chọn Không để cài bản CPU nhẹ.")
+                             "Cài bản GPU + CPU (khuyên dùng)?\n"
+                             "Một bản dùng được CẢ HAI: ô Thiết bị trong app cho chọn GPU hoặc CPU, mặc định GPU "
+                             "(nhanh hơn khoảng 10 lần), GPU lỗi thì tự chạy bằng CPU. Nặng hơn khoảng 3 GB.\n\n"
+                             "Chọn Không: chỉ cài bản CPU nhẹ.")
             return "cuda" if ok else "cpu"
         if flavor == "xpu":
             ok = self.ui.ask("Máy có card Intel",
-                             "Cài bản GPU Intel (Arc, Iris Xe)? Nhanh hơn CPU nhiều lần, nặng hơn khoảng 2 GB. "
-                             "Bản này chưa thử trên nhiều máy: nếu GPU lỗi, app tự chạy lại bằng CPU.\n"
-                             "Chọn Không để cài bản CPU nhẹ.")
+                             "Cài bản GPU + CPU (khuyên dùng)?\n"
+                             "Một bản dùng được CẢ HAI: ô Thiết bị trong app cho chọn GPU Intel hoặc CPU, mặc định GPU, "
+                             "GPU lỗi thì tự chạy bằng CPU. Nặng hơn khoảng 2 GB. Bản Intel chưa thử trên nhiều máy.\n\n"
+                             "Chọn Không: chỉ cài bản CPU nhẹ.")
             return "xpu" if ok else "cpu"
         if vendor == "AMD":
             self.ui.log("Máy có card AMD: bản hiện tại chưa hỗ trợ GPU AMD, dùng CPU.")
@@ -318,8 +321,8 @@ class Launcher:
             return
         self.state.set(gpu_asked=asked + [flavor])
         name = "NVIDIA" if flavor == "cuda" else "Intel"
-        if self.ui.ask(f"Máy có card {name}", f"Bản đang cài chỉ chạy bằng CPU nên chậm. Chuyển sang bản GPU {name} "
-                       "(nhanh hơn nhiều lần, tải thêm vài GB, model giữ nguyên)?"):
+        if self.ui.ask(f"Máy có card {name}", f"Bản đang cài chỉ chạy bằng CPU nên chậm. Chuyển sang bản GPU {name} + CPU "
+                       "(chọn GPU hoặc CPU trong ô Thiết bị, nhanh hơn nhiều lần, tải thêm vài GB, model giữ nguyên)?"):
             self.install(info, flavor)
             self.state.set(**{MODEL_MARK: True})  # model không đổi theo bản app
 
