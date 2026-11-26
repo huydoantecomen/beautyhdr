@@ -1237,8 +1237,17 @@ class Enhancer:
             h = s.nlm_h if s.nlm_h is not None else classic.auto_denoise_h(img) + 2
             img = classic.quick_enhance(img, upscale=1, denoise_h=h, clahe_clip=max(s.clahe_clip, 1.5), sharpen=0,
                                         bright=s.brightness, low_light=s.low_light)
-        elif s.low_light or abs(s.brightness) > 1e-3:
-            img = classic.brightness(classic.retinex_l(img) if s.low_light else img, s.brightness)
+        else:
+            if s.low_light or abs(s.brightness) > 1e-3:
+                img = classic.brightness(classic.retinex_l(img) if s.low_light else img, s.brightness)
+            # Tương phản (CLAHE): trước bản 0.15.2 chỉ chạy ở mức 1 và Ảnh cũ, nên thanh Tương phản (và CLAHE mà Tự động bật
+            # cho ảnh nhạt) không đổi gì ở mức 2–6 (audit 0.15.2). Chạy ở cỡ gốc, trước mạng nền, như chế độ Ảnh cũ.
+            if s.clahe_clip > 1e-3:
+                img = classic.clahe_l(img, s.clahe_clip)
+            # Khử nhiễu chỉnh tay: compact nhận mức này qua sr_dn (trộn bản khử nhiễu của model); RRDB, RealPLKSR, DAT-2 không
+            # có nút khử nhiễu nên trước 0.15.2 thanh Khử nhiễu không đổi gì với các model này. Khử NLM ở cỡ gốc như mức 1.
+            if s.nlm_h is not None and s.nlm_h > 0 and s.sr_model != "compact" and s.sr_denoise is None:
+                img = classic.denoise(img, s.nlm_h)
         self._check()
 
         bg_name = weights.MANIFEST[weights.SPANDREL_SR[s.sr_model]].label if s.sr_model in weights.SPANDREL_SR else "Real-ESRGAN"

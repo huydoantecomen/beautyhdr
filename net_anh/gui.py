@@ -967,6 +967,10 @@ class Histogram(QWidget):
 LOOK_TIP = ("Tông mẫu: đưa màu da, môi, tóc, vùng trắng và nền về gần tông của một bộ ảnh mẫu. Trong sáng: da sáng, "
             "trong, ít vàng đỏ; môi tươi; tóc đen; nền phẳng sạch (đo từ ảnh thẻ mẫu). Bộ preset .netanh.json có kèm "
             "tông mẫu sẽ hiện thêm ở đây. Mặc định: Giữ tông ảnh.")
+# Thông số không có ô trên giao diện nhưng mức nét / preset / Tự động có đặt (vd mức 2 của ảnh cũ: sr_denoise = 1, khử hạt
+# mạnh). _apply_settings giữ lại, settings() gửi kèm, để giá trị đó tới được bước render (audit 0.15.2).
+HIDDEN_FIELDS = ("sr_denoise", "deblur", "face_ai", "small_face_sr", "fade_style", "max_faces", "tile", "color_match",
+                 "protect_faces")
 DESHINE_DEFAULT = 0.6  # cường độ khử bóng da khi vừa tích ô (đo trên ảnh chân dung da dầu của huy)
 BG_SWATCHES = (("Trắng", (255, 255, 255)), ("Xanh", (219, 142, 67)), ("Xanh nhạt", (235, 206, 135)),
                ("Đỏ", (30, 30, 200)), ("Xám kem", (203, 212, 217)))
@@ -2409,6 +2413,7 @@ class MainWindow(QMainWindow):
                    self.bg_model, self.cb_detail_same, self.cb_keep_lips, self.subject, self.cb_restore, self.cb_vivid, self.cb_ai_color)
         for w in widgets:
             w.blockSignals(True)
+        self._hidden = {k: getattr(s, k) for k in HIDDEN_FIELDS}
         self.mode.setCurrentIndex(self.mode.findData(s.mode))
         self.scale.setCurrentIndex(self.scale.findData(s.upscale))
         self.sl_sharp.set(s.sharpness)
@@ -2462,7 +2467,7 @@ class MainWindow(QMainWindow):
                         repair=1.0 if self.cb_restore.isChecked() else 0.0,
                         fade=1.0 if self.cb_restore.isChecked() else 0.0, auto_rotate=self.cb_restore.isChecked(),
                         damage_mask=self.damage_path, scene_vivid=1.0 if self.cb_vivid.isChecked() else 0.0,
-                        scene_ai=1.0 if self.cb_ai_color.isChecked() else 0.0)
+                        scene_ai=1.0 if self.cb_ai_color.isChecked() else 0.0, **getattr(self, "_hidden", {}))
 
     def _draw_damage(self):
         if self.src_img is None:
