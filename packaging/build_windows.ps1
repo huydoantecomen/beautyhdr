@@ -208,6 +208,15 @@ function Find-Install {
     return $null
 }
 
+# Ghi nhớ thư mục mã nguồn này để lần sau CAP_NHAT.bat tự gợi ý (packaging\cap_nhat.ps1 đọc)
+function Save-SourceRoot {
+    try {
+        $f = Join-Path $env:LOCALAPPDATA "NetAnh\thu_muc_nguon.txt"
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $f) | Out-Null
+        Set-Content -LiteralPath $f -Value (Split-Path -Parent $Root) -Encoding UTF8
+    } catch { }
+}
+
 try {
     if ($CapNhat) {
         Step "0/6 Tìm Beauty HDR đã cài"
@@ -231,7 +240,7 @@ try {
         Write-Host "Bản đã cài: $Flavor"
         if (-not (Test-Path -LiteralPath (Join-Path $Venv "Scripts\python.exe"))) {
             Write-Host "Không thấy môi trường build cũ ($Venv): phải tải lại thư viện (torch), lâu hơn. Model vẫn KHÔNG tải lại." -ForegroundColor Yellow
-            Write-Host "Muốn nhanh: đóng cửa sổ này, chép gói Cập nhật vào ĐÚNG thư mục chứa bản cũ (có thư mục ma-nguon\_build) rồi chạy lại." -ForegroundColor Yellow
+            Write-Host "Muốn nhanh: đóng cửa sổ này, bấm lại CAP_NHAT.bat và chọn thư mục bản cũ có thư mục ma-nguon\_build." -ForegroundColor Yellow
         }
     }
     New-Item -ItemType Directory -Force -Path $Work | Out-Null
@@ -325,6 +334,7 @@ try {
         if (Test-Path -LiteralPath $Log2) { Get-Content -LiteralPath $Log2 -Encoding UTF8 | ForEach-Object { Write-Host $_ } }
         if ($pr.ExitCode -ne 0) { throw "Đã chép bản $Version nhưng tự kiểm KHÔNG ĐẠT (mã $($pr.ExitCode)), xem $Log2" }
         Write-Host ""
+        Save-SourceRoot
         Write-Host "XONG. Beauty HDR đã lên bản $Version, model giữ nguyên. Mở Beauty HDR từ menu Start như mọi khi." -ForegroundColor Green
         Write-Host "Thư mục _build giữ lại để lần cập nhật sau nhanh; đừng xoá." -ForegroundColor Green
         exit 0
@@ -362,7 +372,8 @@ try {
     Write-Host ""
     Write-Host "XONG. File cài đặt: $Final" -ForegroundColor Green
     if (-not $NoInstaller) {
-        Write-Host "Bấm đúp file đó để cài Beauty HDR, sau đó mở Beauty HDR từ menu Start. Thư mục _build chỉ chứa file tạm, xoá được." -ForegroundColor Green
+        Save-SourceRoot
+        Write-Host "Bấm đúp file đó để cài Beauty HDR, sau đó mở Beauty HDR từ menu Start. Giữ thư mục này (có _build): lần sau gói Cập nhật dùng lại, khỏi tải lại thư viện." -ForegroundColor Green
     }
     if ($env:CI -ne "true") { Start-Process -FilePath "explorer.exe" -ArgumentList "/select,`"$Final`"" }
     exit 0

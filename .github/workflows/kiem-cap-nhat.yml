@@ -1,0 +1,33 @@
+# Kiểm thử script gói Cập nhật (packaging/cap_nhat.ps1) trên Windows thật: nhận thư mục bản cũ, tìm, ghi đè mã mới,
+# giữ _build. Không build app (nhanh, ~1 phút).
+name: Kiem thu goi Cap nhat
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ["packaging/cap_nhat.ps1", "packaging/nguoi_dung/*.bat", ".github/workflows/kiem-cap-nhat.yml"]
+
+jobs:
+  kiem:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: PowerShell 5.1 (như máy người dùng)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File packaging\cap_nhat.ps1 -KiemThu -NguonMoi "$env:GITHUB_WORKSPACE"
+      - name: Chạy đường chính với -Target, không build
+        shell: powershell
+        run: |
+          $old = Join-Path $env:RUNNER_TEMP "ban cu\NetAnh-0.14.2"
+          New-Item -ItemType Directory -Force -Path (Join-Path $old "ma-nguon\net_anh"), (Join-Path $old "ma-nguon\_build") | Out-Null
+          Set-Content -LiteralPath (Join-Path $old "ma-nguon\net_anh\__init__.py") -Value '__version__ = "0.14.2"'
+          powershell -NoProfile -ExecutionPolicy Bypass -File packaging\cap_nhat.ps1 -Target $old -NguonMoi "$env:GITHUB_WORKSPACE" -NoBuild
+          if ($LASTEXITCODE -ne 0) { throw "cap_nhat.ps1 lỗi $LASTEXITCODE" }
+          $v = Get-Content -LiteralPath (Join-Path $old "ma-nguon\net_anh\__init__.py") -Raw
+          if ($v -notmatch '0\.15') { throw "chưa ghi đè: $v" }
+          if (-not (Test-Path -LiteralPath (Join-Path $old "ma-nguon\_build"))) { throw "mất _build" }
+          powershell -NoProfile -ExecutionPolicy Bypass -File packaging\cap_nhat.ps1 -Target (Join-Path $env:RUNNER_TEMP "khong-phai") -NguonMoi "$env:GITHUB_WORKSPACE" -NoBuild
+          if ($LASTEXITCODE -eq 0) { throw "phải từ chối thư mục sai" }
+          Write-Host "ĐẠT"
+          exit 0
