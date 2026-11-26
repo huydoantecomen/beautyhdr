@@ -23,7 +23,10 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
 from . import facestyle, weights
 from .subject import SUBJECTS
 from .analysis import Analysis, recommend
-from .device import list_devices
+from . import gpu_profile
+from .batch import BatchRunner, extra_engines
+from .batch import workers_for as batch_workers_for
+from .device import UNSUPPORTED, list_devices
 from . import hardware
 from .history import History
 from .levels import BG_MODELS, FACE_MODELS, LEVELS, auto_level, auto_upscale, level_for, level_settings, models_needed
@@ -420,11 +423,91 @@ class ModelsDialog(QDialog):
         self.refresh()
 
 
+def profile_text(dev, eng=None) -> str:
+    """Một dòng về cách app dùng card này: dòng card, kiểu số, cỡ ô, hàng loạt, mức hỗ trợ."""
+    fam = dev.family
+    parts = [f"Dòng: {fam.label}"]
+    if eng is not None and eng.precision:
+        used = sorted({v[0] for v in eng.precision.values()})
+        parts.append("kiểu số " + "/".join(used) + " (đã chạy thử, đạt)")
+    else:
+        parts.append("kiểu số: thử " + " → ".join(fam.precisions) + ", sai thì fp32")
+    if dev.vram_gb:
+        parts.append(f"VRAM {dev.vram_gb:.0f} GB ({gpu_profile.vram_class(dev.vram_gb)}): cắt ô theo bộ nhớ còn trống")
+    m = hardware.machine()
+    n = gpu_profile.batch_workers(dev.kind, dev.vram_gb, m.ram_gb, m.threads)
+    parts.append(f"thư mục: {n} ảnh song song" if n > 1 else "thư mục: nạp model một lần, đọc/ghi ảnh song song")
+    parts.append(f"hỗ trợ {fam.support}")
+    return " · ".join(parts)
+
+
+class CardsDialog(QDialog):
+    """Bảng khuyến nghị theo dòng card (gpu_profile.table), tô đậm dòng của máy này."""
+
+    COLS = ("Dòng card", "Ví dụ", "Kiểu số (thử theo thứ tự)", "Cắt ô (compact / DAT-2)", "Nên dùng", "Hàng loạt", "Mức hỗ trợ", "Ghi chú")
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle("Khuyến nghị theo card")
+        self.resize(1180, 520)
+        devs = getattr(parent, "_devices", [])
+        mine = next((d for d in devs if d.kind != "cpu"), None)
+        mine_key = mine.family.key if mine is not None else "cpu"
+        rows = gpu_profile.table()
+        head = QLabel(self._head(parent, mine))
+        head.setWordWrap(True)
+        t = QTableWidget(len(rows), len(self.COLS))
+        t.setHorizontalHeaderLabels(list(self.COLS))
+        t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        t.setWordWrap(True)
+        bold = QFont()
+        bold.setBold(True)
+        for r, (key, row) in enumerate(zip(gpu_profile.TABLE_ORDER, rows)):
+            for c, col in enumerate(self.COLS):
+                it = QTableWidgetItem(row[col])
+                it.setToolTip(row[col])
+                if key == mine_key:
+                    it.setFont(bold)
+                    it.setBackground(QColor("#3d4b59"))
+                t.setItem(r, c, it)
+        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        for c, w in enumerate((210, 200, 140, 250, 170, 160, 85, 380)):
+            t.setColumnWidth(c, w)
+        t.resizeRowsToContents()
+        note = QLabel("Kiểu số: app chạy thử từng model với một ảnh mẫu ở fp32 và ở kiểu nhanh hơn, lệch thì dùng fp32; "
+                      "khi chạy thật ô nào ra lỗi vẫn tự chạy lại fp32. Cắt ô: theo bộ nhớ GPU còn trống lúc chạy, thiếu "
+                      "thì tự chia nhỏ hơn. Tốc độ GPU trong ước tính thời gian là ước lượng, chưa đo trên từng dòng card.")
+        note.setWordWrap(True)
+        note.setObjectName("muted")
+        lay = QVBoxLayout(self)
+        lay.addWidget(head)
+        lay.addWidget(t, 1)
+        lay.addWidget(note)
+
+    @staticmethod
+    def _head(parent, mine) -> str:
+        m = hardware.machine()
+        if mine is not None:
+            eng = getattr(parent, "_engine", None)
+            same = eng is not None and eng.dev.device == mine.device
+            return f"<b>Máy này:</b> {mine.name} · {profile_text(mine, eng if same else None)}"
+        bad = "; ".join(f"{n}: {why}" for n, why in UNSUPPORTED)
+        g = m.unused_gpu
+        extra = bad or (hardware.advice(g) if g is not None else "")
+        return f"<b>Máy này:</b> {m.summary()}" + (f"<br>{extra}" if extra else "")
+
+
 def machine_advice(m: hardware.Machine, kind: str) -> str:
     """Một câu khuyên dùng model theo cấu hình máy (Quản lý model)."""
     vram = max((g.vram_gb for g in m.gpus if g.usable), default=0.0)
+    if kind == "cuda" and vram >= 11:
+        return ("GPU mạnh, nhiều bộ nhớ: dùng thoải mái model nặng (RestoreFormer++, DAT-2, mức 6); ảnh cắt thành ô lớn "
+                "hoặc không cắt, làm thư mục chạy song song.")
     if kind == "cuda" and vram >= 6:
         return "GPU đủ mạnh: dùng được cả model nặng (RestoreFormer++, DAT-2) với thời gian vài chục giây mỗi ảnh."
+    if kind == "cuda" and vram:
+        return ("GPU ít bộ nhớ (dưới 6 GB): model nhẹ chạy nhanh; model nặng vẫn chạy (app tự cắt ô nhỏ) nhưng chậm, "
+                "nên dùng mức 1–5.")
     if kind != "cpu":
         return ("Có GPU nhưng bộ nhớ ít hoặc không rõ: model nặng vẫn chạy (app tự chia ô nhỏ), chậm hơn. "
                 "Model nhẹ (mặc định) nhanh.")
@@ -1272,6 +1355,8 @@ class MainWindow(QMainWindow):
         m = mb.addMenu("Model")
         m.addActions([self.a_models, self.a_presets])
         m = mb.addMenu("Trợ giúp")
+        m.addAction(self._act("Khuyến nghị theo card…", lambda: CardsDialog(self).exec()))
+        m.addAction(self._act("Đo tốc độ card…", self.bench_gpu))
         m.addAction(self._act("Giới thiệu", lambda: QMessageBox.about(
             self, APP_NAME, f"{APP_NAME} PC {__import__('net_anh').__version__}\nLàm nét, khôi phục ảnh chân dung "
                             "bằng AI chạy trên máy.\n\nĐơn giản (Ctrl+1): chọn loại ảnh, mức nét, bấm Làm nét.\n"
@@ -1505,6 +1590,9 @@ class MainWindow(QMainWindow):
         self.dev_note = QLabel()
         self.dev_note.setObjectName("muted")
         self.dev_note.setWordWrap(True)
+        self.btn_cards = QPushButton("Khuyến nghị theo card…")
+        self.btn_cards.setToolTip("Bảng kiểu số, cỡ ô cắt ảnh, model nên dùng và mức hỗ trợ cho từng dòng card")
+        self.btn_cards.clicked.connect(lambda: CardsDialog(self).exec())
         self.fmt = QComboBox()
         for t, e in (("JPG", ".jpg"), ("PNG", ".png"), ("WebP", ".webp")):
             self.fmt.addItem(t, e)
@@ -1712,6 +1800,7 @@ class MainWindow(QMainWindow):
         sec_out = Section("Xuất và thiết bị", opened=False)
         sec_out.add("Thiết bị", self.device, "gpu cpu card thiết bị render")
         sec_out.add("", self.dev_note, "gpu cpu card thiết bị render")
+        sec_out.add("", self.btn_cards, "gpu card khuyen nghi rtx gtx vram")
         sec_out.add("Định dạng", self.fmt, "jpg png webp")
         sec_out.add("Chất lượng", self.quality, "jpg")
         sec_out.add("Cỡ ảnh ra", self.out_size, "1k 2k 4k")
@@ -2448,6 +2537,7 @@ class MainWindow(QMainWindow):
         self.device.addItem("Tự động (có GPU thì dùng GPU)", "auto")
         if gpu is not None:
             self.device.addItem(gpu.name + ("" if gpu.half else ", fp32"), "gpu")
+            self.device.setItemData(1, profile_text(gpu), Qt.ItemDataRole.ToolTipRole)
             self._gpu_reason = ""
         else:
             unused = hardware.machine().unused_gpu
@@ -2469,6 +2559,9 @@ class MainWindow(QMainWindow):
         gpu = next((d for d in self._devices if d.kind != "cpu"), None)
         use = gpu if (want != "cpu" and gpu is not None) else self._devices[-1]
         txt = "Đang dùng: " + use.name
+        if use.kind != "cpu":
+            eng = self._engine if self._engine is not None and self._engine.dev.device == use.device else None
+            txt += ". " + profile_text(use, eng)
         if use.kind == "cpu" and want == "cpu" and gpu is not None:
             txt += " (bạn chọn CPU)"
         elif use.kind == "cpu" and self._gpu_reason:
@@ -2621,6 +2714,7 @@ class MainWindow(QMainWindow):
 
     def invalidate_engine(self):
         self._engine = None
+        self._side = None
 
     def _start(self, fn, on_done, label: str):
         job = Job(fn)
@@ -2634,6 +2728,7 @@ class MainWindow(QMainWindow):
         job.failed.connect(self._failed)
         job.cancelled.connect(lambda: self.say(f"Đã huỷ: {label}. Ảnh gốc và kết quả trước vẫn giữ nguyên."))
         job.finished.connect(self._update_buttons)
+        job.finished.connect(self._device_changed)  # ô Thiết bị: ghi kiểu số đã chạy thử sau lần chạy đầu
         job.start()
         self._tick.start()
         self._show_progress()
@@ -2643,6 +2738,16 @@ class MainWindow(QMainWindow):
         eng = self.engine(job.message.emit)
         eng.cancel_requested = lambda: job.stop
         return eng
+
+    def _side_engine(self, job: Job) -> Enhancer:
+        """Engine thứ hai khi làm thư mục song song: cùng thiết bị, giữ lại cho các lô sau (model khỏi nạp lại).
+        Không đẩy dòng phần trăm lên thanh tiến độ (hai ảnh chạy cùng lúc sẽ làm thanh nhảy loạn)."""
+        side = getattr(self, "_side", None)
+        if side is None or side.dev.device != self._engine.dev.device:
+            side = self._side = Enhancer(self.device.currentData())
+        side.say = lambda m: None if m.rstrip().endswith("%") else job.message.emit(m)
+        side.cancel_requested = lambda: job.stop
+        return side
 
     def cancel(self):
         if self._busy():
@@ -2870,15 +2975,24 @@ class MainWindow(QMainWindow):
 
         def work(job: Job):
             eng = self._engine_for(job)
-            ok = 0
+            n_workers = batch_workers_for(eng)
+            engines = extra_engines(eng, n_workers, lambda: self._side_engine(job))
+            if n_workers > 1:
+                job.message.emit(f"GPU nhiều bộ nhớ: xử lý {n_workers} ảnh song song (mỗi luồng nạp model một lần)")
+            ok = [0]
             tally = BatchTally(len(files))
-            for i, f in enumerate(files, 1):
-                eng._check()
+            runner = BatchRunner(engines, load_image, stop_errors=(Cancelled, InterruptedError))
+            reserved: set = set()
+
+            def one(e: Enhancer, lo):
+                f = lo.item
+                i = lo.index + 1
+                e._check()
                 job.message.emit(f"[{i}/{len(files)}] {f.name}")
                 try:
-                    img = load_image(f)
+                    img = lo.get()
                     if level or auto:
-                        an = eng.analyze(img, with_faces=eng.models_ready())
+                        an = e.analyze(img, with_faces=e.models_ready())
                         base = Settings(upscale=s.upscale, face_model=s.face_model, sr_model=s.sr_model,
                                         phone=s.phone, wb=s.wb, skin_tone=s.skin_tone, subject=s.subject,
                                         face_styles=s.face_styles, keep_lips=s.keep_lips, bg_color=s.bg_color,
@@ -2890,26 +3004,71 @@ class MainWindow(QMainWindow):
                         si = s
                     if self.phone.currentData() == "auto":  # mỗi ảnh một hãng, thông số màu theo hãng đó
                         si = si.with_(phone=detect_phone(f)[0], wb=-1.0, skin_tone=-1.0)
-                    res, rep = eng.process(img, si)
+                    res, rep = e.process(img, si)
                     job.message.emit(f"   {rep.models()}")
-                    out = save_image(resize_long(res, long_side), unique_output_path(f, Path(dst), ext), q)
-                    self.history.add(f, out, res, rep.mode, {**si.to_dict(), "models_used": rep.models()}, rep.seconds)
-                    job.message.emit(f"   → {out.name} · {rep.seconds:.1f} s")
-                    ok += 1
-                    tally.add(rep, f.name)
-                    if rep.ai_fallback:
-                        job.message.emit("   ⚠ AI lỗi, ảnh này chỉ qua xử lý nhanh")
-                except ImageError as e:
-                    tally.fail()
-                    job.message.emit(f"   bỏ qua: {e}")
+                    with runner.lock:  # giữ tên file ra: ảnh trước có thể chưa ghi xong
+                        dst_path = unique_output_path(f, Path(dst), ext)
+                        k = 2
+                        while dst_path in reserved:
+                            dst_path = dst_path.with_name(f"{dst_path.stem}_{k}{dst_path.suffix}")
+                            k += 1
+                        reserved.add(dst_path)
+
+                    def save(res=res, rep=rep, si=si, f=f, dst_path=dst_path):
+                        try:
+                            out = save_image(resize_long(res, long_side), dst_path, q)
+                            with runner.lock:
+                                self.history.add(f, out, res, rep.mode, {**si.to_dict(), "models_used": rep.models()},
+                                                 rep.seconds)
+                                ok[0] += 1
+                                tally.add(rep, f.name)
+                            job.message.emit(f"   → {out.name} · {rep.seconds:.1f} s")
+                            if rep.ai_fallback:
+                                job.message.emit("   ⚠ AI lỗi, ảnh này chỉ qua xử lý nhanh")
+                        except Exception as ex:  # ổ đầy, không ghi được: báo, làm tiếp ảnh khác
+                            with runner.lock:
+                                tally.fail()
+                            job.message.emit(f"   LỖI ghi {f.name}: {ex.__class__.__name__}: {ex}")
+
+                    runner.later(save)
+                except ImageError as ex:
+                    with runner.lock:
+                        tally.fail()
+                    job.message.emit(f"   bỏ qua: {ex}")
                 except (Cancelled, InterruptedError):
                     raise
-                except Exception as e:  # một ảnh lỗi (hết RAM, ổ đầy, không ghi được…) không dừng cả thư mục
-                    tally.fail()
-                    job.message.emit(f"   LỖI: {e.__class__.__name__}: {e}")
-            return ok, len(files), tally
+                except Exception as ex:  # một ảnh lỗi (hết RAM, ổ đầy, không ghi được…) không dừng cả thư mục
+                    with runner.lock:
+                        tally.fail()
+                    job.message.emit(f"   LỖI: {ex.__class__.__name__}: {ex}")
+
+            runner.run(files, one)
+            return ok[0], len(files), tally
 
         self._start(work, lambda r: self._batch_done(r), "xử lý thư mục")
+
+    def bench_gpu(self):
+        """Đo tốc độ, độ chính xác từng kiểu số trên card này (gpu_bench), ghi file .txt để gửi người phát triển."""
+        if self._busy():
+            return
+        if QMessageBox.question(self, APP_NAME, "Đo tốc độ card: chạy thử các model nền ở fp32 / fp16 / bf16 và cả quy "
+                                "trình làm nét, mất khoảng 1–5 phút trên GPU (CPU lâu hơn). Kết quả ghi ra file .txt "
+                                "ngoài Desktop. Bắt đầu?") != QMessageBox.StandardButton.Yes:
+            return
+        from .gpu_bench import run as bench_run
+
+        dev = self.device.currentData()
+        self.invalidate_engine()  # bench nạp model riêng: nhả bộ nhớ GPU của engine đang giữ
+
+        def work(job: Job):
+            return bench_run(job.message.emit, device=dev)
+
+        def done(path):
+            self.say(f"Đã đo xong: {path}")
+            QMessageBox.information(self, APP_NAME, f"Đã ghi kết quả đo vào:\n{path}\n\nGửi file này để tinh chỉnh app "
+                                    "cho dòng card của bạn.")
+
+        self._start(work, done, "đo tốc độ card")
 
     def _batch_done(self, r):
         self.say("Xong thư mục: " + r[2].summary())

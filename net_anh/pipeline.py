@@ -23,6 +23,7 @@ import torch
 from . import classic, weights
 from .analysis import MAX_SIDE, MIN_FACE_PX, Analysis, Face, analyze, select_faces
 from .archs import GFPGANv1Clean, RRDBNet, SRVGGNetCompact
+from . import gpu_profile
 from .device import DeviceInfo, pick_device
 from .settings import MODES, Settings
 
@@ -326,6 +327,13 @@ class Enhancer:
     def __init__(self, device: str = "auto", progress: Progress | None = None):
         self.dev = pick_device(device)
         self.say = progress or (lambda m: None)
+        # kiểu số đã chọn cho từng model nền sau khi chạy thử: khoá → (tên kiểu, kết quả thử từng kiểu)
+        self.precision: dict[str, tuple[str, list[tuple[str, gpu_profile.ProbeResult]]]] = {}
+        self.vram_share = 1.0  # phần bộ nhớ GPU của engine này khi làm thư mục song song (batch.extra_engines)
+        self.last_tile = 0
+        if self.dev.family.tf32:  # Ampere trở lên: nhân ma trận fp32 bằng TF32 (attention của DAT-2, RestoreFormer)
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
         self.cancel_requested: Callable[[], bool] = lambda: False
         self._esrgan: dict = {}
         self._sr_extra: dict = {}  # model nền nạp bằng spandrel (DAT-2, RealPLKSR): model_id → (mạng, kiểu số)
@@ -364,6 +372,37 @@ class Enhancer:
         if self.cancel_requested():
             raise Cancelled()
 
+    _DT = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp32": torch.float32}
+
+    def _place(self, net: torch.nn.Module, key: str, half: bool = True, bf16: bool = False) -> tuple[torch.nn.Module, torch.dtype]:
+        """Đưa model nền lên thiết bị và chọn kiểu số: thử lần lượt các kiểu dòng card cho phép (gpu_profile), mỗi kiểu
+        chạy một ảnh mẫu so với fp32; kiểu đầu tiên đạt thì dùng, không đạt kiểu nào thì fp32. Kết quả nhớ theo `key`
+        nên đổi mức khử nhiễu (nạp lại compact) không phải thử lại."""
+        net = net.eval().to(self.dev.device)
+        if self.dev.kind == "cpu":
+            return net, torch.float32
+        if key in self.precision:
+            name = self.precision[key][0]
+        else:
+            fam = self.dev.family
+            native_bf16 = self.dev.kind == "cuda" and (self.dev.cc or (0, 0))[0] >= 8 and not getattr(torch.version, "hip", None)
+            tried: list[tuple[str, gpu_profile.ProbeResult]] = []
+            name = "fp32"
+            for cand in gpu_profile.candidates(fam, half, bf16, native_bf16):
+                if cand == "fp32":
+                    break
+                r = gpu_profile.probe_dtype(net, self.dev.device, self._DT[cand])
+                tried.append((cand, r))
+                if r.ok:
+                    name = cand
+                    break
+            self.precision[key] = (name, tried)
+            bad = [f"{c} {r.why}" for c, r in tried if not r.ok]
+            if bad:
+                self.say(f"{key}: {'; '.join(bad)} trên {self.dev.name}, dùng {name}")
+        dt = self._DT[name]
+        return net.to(dt), dt
+
     # ----- nạp model khi cần -----
 
     def _ensure(self, model_id: str):
@@ -383,9 +422,7 @@ class Enhancer:
                 a = {k: dn * v + (1 - dn) * b[k] for k, v in a.items()}
             net = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, num_conv=32, upscale=4, act_type="prelu")
             net.load_state_dict(a, strict=True)
-            net.eval().to(self.dev.device)
-            if self.dev.half:
-                net.half()
+            net, _ = self._place(net, "compact")
             self._esrgan = {k: v for k, v in self._esrgan.items() if not isinstance(k, tuple)}  # chỉ giữ 1 mức
             self._esrgan[key] = net
         return self._esrgan[key]
@@ -402,13 +439,9 @@ class Enhancer:
             desc = spandrel.ModelLoader(device="cpu").load_from_file(str(path))
             if desc.scale != 4:
                 raise weights.ModelError(f"{info.file}: cần model phóng 4×, file này {desc.scale}×")
-            dtype = torch.float32  # luôn ghi rõ: thiết bị dùng fp16 cho Real-ESRGAN nhưng DAT-2 không chạy được fp16
-            if self.dev.kind == "cuda":
-                if desc.supports_half and self.dev.half:
-                    dtype = torch.float16
-                elif desc.supports_bfloat16 and torch.cuda.get_device_capability(self.dev.device)[0] >= 8:  # bf16 thật (RTX 30 trở lên), không giả lập
-                    dtype = torch.bfloat16
-            net = desc.model.eval().to(self.dev.device, dtype)
+            # DAT-2 không chạy fp16 (supports_half False): RTX 30 trở lên thử bf16 thật (Turing chỉ giả lập bf16), không
+            # thì fp32. torch.cuda.is_bf16_supported() trả True giả trên Turing nên xét compute capability ≥ 8.
+            net, dtype = self._place(desc.model, model_id, bool(desc.supports_half), bool(desc.supports_bfloat16))
             self._sr_extra = {model_id: (net, dtype)}
         return self._sr_extra[model_id]
 
@@ -419,9 +452,7 @@ class Enhancer:
             net = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=scale)
             ckpt = torch.load(path, map_location="cpu", weights_only=True)
             net.load_state_dict(ckpt.get("params_ema", ckpt.get("params", ckpt)), strict=True)
-            net.eval().to(self.dev.device)
-            if self.dev.half:
-                net.half()
+            net, _ = self._place(net, f"esrgan_x{scale}")
             self._esrgan[scale] = net
         return self._esrgan[scale]
 
@@ -777,15 +808,13 @@ class Enhancer:
     @torch.no_grad()
     def _esrgan_run(self, img: np.ndarray, scale: int, tile: int, net=None, dtype: torch.dtype | None = None,
                     pad: int = 10, label: str = "Real-ESRGAN") -> np.ndarray:
-        """`dtype`: kiểu số của model nạp bằng spandrel (None: fp16 nếu thiết bị dùng fp16, như Real-ESRGAN)."""
+        """Ảnh vào được đổi sang đúng kiểu số của model (fp32 / fp16 / bf16 do _place chọn). `dtype` giữ để tương thích."""
         net = net if net is not None else self._load_esrgan(scale)
         h, w = img.shape[:2]
         ph, pw = h % 2, w % 2  # mô hình x2 dùng pixel_unshuffle: cạnh phải chẵn
         if ph or pw:
             img = cv2.copyMakeBorder(img, 0, ph, 0, pw, cv2.BORDER_REFLECT)
-        x = _to_tensor(img, self.dev, self.dev.half and dtype is None)
-        if dtype is not None:
-            x = x.to(dtype)
+        x = _to_tensor(img, self.dev, False).to(next(net.parameters()).dtype)
         if not tile or (x.shape[2] <= tile and x.shape[3] <= tile):
             return _to_image(self._forward(net, x))[: h * scale, : w * scale]
         return self._tiled(net, x, scale, tile, pad=pad, label=label)[: h * scale, : w * scale]
@@ -805,6 +834,13 @@ class Enhancer:
                 self._nonfinite = True
                 o = torch.nan_to_num(o.float(), nan=0.5, posinf=1.0, neginf=0.0)
         return o
+
+    def _auto_tile(self, model: str, net) -> int:
+        if self.dev.kind == "cpu":
+            return gpu_profile.CPU_TILE
+        dt = {torch.float16: "fp16", torch.bfloat16: "bf16"}.get(next(net.parameters()).dtype, "fp32")
+        k = self.vram_share
+        return gpu_profile.auto_tile(model, self.dev.free_vram_gb() * k, self.dev.vram_gb * k, dt)
 
     def _tiled(self, net, x: torch.Tensor, scale: int, tile: int, pad: int, label: str = "Real-ESRGAN") -> np.ndarray:
         """Chạy chia ô, ghép vào ảnh uint8 trên RAM (không giữ tensor float cả ảnh ra: ảnh 12 MP phóng 4× là 192 MP,
@@ -891,8 +927,18 @@ class Enhancer:
             if not compact:
                 scale = 4
         tile = s.tile
-        if extra and tile:
+        if tile < 0:  # tự động: GPU theo bộ nhớ còn trống và kiểu số, CPU 400 px như cũ
+            tile = self._auto_tile(s.sr_model if s.sr_model in gpu_profile.ACT_BYTES_PER_PX else "rrdb",
+                                   net if net is not None else self._load_esrgan(scale))
+            if self.dev.kind not in ("cuda", "xpu") and extra:  # DirectML, Metal: không đọc được bộ nhớ, giữ trần cũ
+                tile = min(tile, weights.MANIFEST[extra].tile or tile)
+            # ô to thì dải cộng dồn float32 trên RAM (cao một hàng ô × rộng cả ảnh ra) cũng to: ảnh rộng 4000 px phóng 4×
+            # với ô 1536 px là gần 1,2 GB. Giữ dải dưới gpu_profile.BAND_BYTES để máy 8 GB RAM không thiếu bộ nhớ.
+            band = int(gpu_profile.BAND_BYTES / (12 * scale * scale * max(1, img.shape[1])))
+            tile = max(gpu_profile.TILE_MIN, min(tile, band - band % 32))
+        elif extra and tile:
             tile = min(tile, weights.MANIFEST[extra].tile or tile)
+        self.last_tile = tile
         self._fp32_fallback = self._nonfinite = False
         while True:
             try:
@@ -911,9 +957,7 @@ class Enhancer:
         else:
             name = f"Real-ESRGAN x{scale}plus"
         if self.dev.kind != "cpu":
-            p = next(net.parameters()).dtype if net is not None else (torch.float16 if self.dev.half else torch.float32)
-            if net is None:
-                p = next(self._load_esrgan(scale).parameters()).dtype
+            p = next((net if net is not None else self._load_esrgan(scale)).parameters()).dtype
             name += {torch.float16: " (fp16)", torch.bfloat16: " (bf16)"}.get(p, " (fp32)")
         rep.bg_model = name
         if self._fp32_fallback:

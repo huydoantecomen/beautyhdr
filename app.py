@@ -5,6 +5,7 @@
     NetAnh.exe --tai-model DIR    tải sẵn model
     NetAnh.exe --cli ...          chạy dòng lệnh (như python -m net_anh.cli)
     NetAnh.exe --may-chu          máy chủ cho app điện thoại (cửa sổ hiện mã ghép nối)
+    NetAnh.exe --do-gpu           đo tốc độ card (fp32/fp16/bf16, bộ nhớ, cả quy trình), ghi file kết quả
 """
 import sys
 

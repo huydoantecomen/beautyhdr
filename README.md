@@ -128,7 +128,10 @@ net_anh/
   classic.py    khử nhiễu theo mức nhiễu, Retinex, CLAHE, unsharp, frequency separation
   history.py    lịch sử SQLite + thumbnail
   weights.py    manifest model, tải, SHA-256, thử lại
-  device.py     CUDA / DirectML / Metal / CPU
+  device.py     CUDA / XPU / DirectML / Metal / CPU, bỏ card mà bản PyTorch không chạy được
+  gpu_profile.py dòng card, kiểu số có chạy thử, cắt ô theo VRAM, bảng khuyến nghị
+  batch.py      làm thư mục: đọc trước, ghi luồng riêng, 2 ảnh song song trên GPU lớn
+  gpu_bench.py  đo tốc độ card (--do-gpu)
   identity.py   ArcFace để đo IDS
   gui.py, cli.py
   server.py     máy chủ cho app điện thoại: HTTP API v1, mã ghép nối, hàng đợi một GPU, tìm máy qua UDP
@@ -152,6 +155,51 @@ Sửa ám vàng, đỏ của ảnh điện thoại và bộ lọc theo hãng (đ
 App Android bật **Chất lượng cao nhất** thì gửi ảnh tới PC này để xử lý bằng model nặng nhất trên GPU, máy chủ không
 có thì điện thoại tự xử lý trên máy. Mở **Beauty HDR - Máy chủ cho điện thoại** (menu Start), `may_chu.bat` hoặc
 `python -m net_anh.server`. Cài đặt, ghép nối, dùng ở ngoài qua Tailscale, API: [docs/MAY_CHU.md](docs/MAY_CHU.md).
+
+## Thay đổi ở 0.15.0 (tối ưu theo dòng card đồ hoạ)
+
+- Tự nhận dòng card và bộ nhớ (`net_anh/gpu_profile.py`): NVIDIA theo thế hệ chip đọc từ driver (GTX 900, GTX 10, GTX 16,
+  RTX 20/30/40/50), Intel Arc / Iris Xe, AMD (ROCm, DirectML), Apple. Ô Thiết bị ghi dòng card, kiểu số, cỡ ô, cách làm thư
+  mục và mức hỗ trợ; nút **Khuyến nghị theo card…** (và menu Trợ giúp) mở bảng dưới, tô đậm dòng của máy này.
+- Kiểu số có kiểm tra tự động: mỗi model nền khi nạp lên GPU chạy một ảnh mẫu (có mảng sáng phẳng, chỗ làm fp16 hay tràn
+  số) ở fp32 và ở kiểu nhanh hơn; lệch quá 3 mức xám, ra NaN hay ra đen thì dùng fp32 cho model đó. Khi chạy thật, ô nào
+  hỏng vẫn tự chạy lại fp32 như 0.8.1. GTX 16 và GTX 10 luôn fp32 (không thử). RTX 30 trở lên: fp16 cho Real-ESRGAN,
+  RealPLKSR; DAT-2 thử bf16 (fp16 của DAT-2 ra NaN, đo được trên CPU), bật TF32. Ép kiểu để đo: `NETANH_PRECISION=fp32`.
+- Cắt ô theo bộ nhớ GPU còn trống (Settings.tile mặc định −1 = tự động, CLI `--tile -1`): card 4–6 GB cắt ô nhỏ cho
+  model nặng, card 12 GB trở lên gần như không phải cắt với model nhẹ, ô DAT-2 lớn gấp 2–3 lần trước (ít đường ghép,
+  nhanh hơn). Thiếu bộ nhớ thật vẫn tự chia đôi ô. CPU giữ ô 400 px.
+- Làm cả thư mục nhanh hơn (`net_anh/batch.py`, dùng cho cả giao diện và dòng lệnh): model nạp một lần, ảnh kế tiếp được
+  đọc trước trong lúc ảnh hiện tại đang chạy, ghi file ở luồng riêng; GPU NVIDIA từ 11 GB VRAM, máy 16 GB RAM, 8 luồng
+  thì chạy 2 ảnh song song (mỗi luồng một bộ model, chia đôi bộ nhớ khi tính ô). Ép số luồng: CLI `--song-song N`, hoặc
+  biến `NETANH_BATCH_WORKERS`.
+- GTX 10 / GTX 900: PyTorch CUDA 12.8 trở lên không còn mã máy cho Pascal, Maxwell (đọc được trong bản PyTorch mới:
+  sm_75 trở lên). Thêm gói **cuda_old** (PyTorch CUDA 12.6) ở BeautyHDR.exe và `build_windows.ps1 -Flavor cuda_old`;
+  BeautyHDR.exe tự chọn theo tên card và hỏi chuyển nếu máy GTX 10 đã lỡ cài bản GPU thường. App không còn liệt kê card
+  mà bản PyTorch đang cài không chạy được (trước đây chạy là lỗi "no kernel image"), mà ghi lý do.
+- Intel Arc / Iris Xe (gói xpu từ 0.14.1) giữ fp32, cắt ô theo bộ nhớ; AMD chưa có gói cài sẵn (ROCm hoặc DirectML tự cài
+  từ mã nguồn), thử nghiệm.
+- Đo trên card thật: **Trợ giúp → Đo tốc độ card…** hoặc `NetAnh.exe --do-gpu` (`python app.py --do-gpu`, thêm `--nhanh`):
+  đo từng model nền ở fp32/fp16/bf16 (lệch so với fp32, thời gian ô 256 và 512 px, byte bộ nhớ mỗi điểm ảnh), GFPGAN, cả
+  quy trình 1 và 2 luồng, ghi file `BeautyHDR-do-gpu-….txt` ra Desktop. Các số tốc độ GPU trong bảng là ước lượng, chưa
+  đo trên card thật.
+
+Bảng khuyến nghị (cột Cắt ô: cạnh ô lớn nhất theo VRAM, compact fp16 / DAT-2 bf16 hoặc fp32, khi card còn trống 90 % bộ nhớ):
+
+| Dòng card | Ví dụ | Kiểu số (thử theo thứ tự) | Cắt ô (compact / DAT-2) | Nên dùng | Hàng loạt | Mức hỗ trợ |
+|---|---|---|---|---|---|---|
+| GeForce RTX 50 (Blackwell) | RTX 5060, 5070, 5080, 5090 | fp16 → bf16 → fp32 | 8 GB: 1536 / 576 px · 12 GB: 1536 / 736 px · 16 GB: 1536 / 864 px · 32 GB: 1536 / 1248 px | mức 1–6 | 2 ảnh song song khi ≥ 11 GB VRAM, 16 GB RAM, 8 luồng | đầy đủ |
+| GeForce RTX 40 (Ada) | RTX 4060, 4070, 4080, 4090 | fp16 → bf16 → fp32 | 8 GB: 1536 / 576 px · 12 GB: 1536 / 736 px · 16 GB: 1536 / 864 px · 24 GB: 1536 / 1088 px | mức 1–6 | 2 ảnh song song khi ≥ 11 GB VRAM, 16 GB RAM, 8 luồng | đầy đủ |
+| GeForce RTX 30 (Ampere) | RTX 3050, 3060, 3070, 3080, 3090 | fp16 → bf16 → fp32 | 4 GB: 1344 / 352 px · 8 GB: 1536 / 576 px · 12 GB: 1536 / 736 px · 24 GB: 1536 / 1088 px | mức 1–6 từ 6 GB; 4 GB nên mức 1–5 | 2 ảnh song song khi ≥ 11 GB VRAM, 16 GB RAM, 8 luồng | đầy đủ |
+| GeForce RTX 20 (Turing có Tensor Core) | RTX 2060, 2070, 2080, Titan RTX | fp16 → fp32 | 6 GB: 1536 / 320 px · 8 GB: 1536 / 384 px · 11 GB: 1536 / 480 px | mức 1–6 | 2 ảnh song song khi ≥ 11 GB VRAM, 16 GB RAM, 8 luồng | đầy đủ |
+| GeForce GTX 16 (Turing không Tensor Core) | GTX 1630, 1650, 1660, 1660 Ti, 1660 Super, MX450 | fp32 | 4 GB: 960 / 224 px · 6 GB: 1280 / 320 px | mức 1–6 từ 6 GB; 4 GB nên mức 1–5 | 1 ảnh, đọc/ghi file song song | đầy đủ |
+| GeForce GTX 10 (Pascal) | GTX 1050, 1050 Ti, 1060, 1070, 1080, MX150–MX350 | fp32 | 2 GB: 448 / 128 px · 4 GB: 960 / 224 px · 6 GB: 1280 / 320 px · 8 GB: 1536 / 384 px · 11 GB: 1536 / 480 px | mức 1–6 từ 6 GB; 2 GB nên mức 1–5 | 2 ảnh song song khi ≥ 11 GB VRAM, 16 GB RAM, 8 luồng | đầy đủ |
+| GeForce GTX 900 / 750 (Maxwell) | GTX 750 Ti, 950, 960, 970, 980 | fp32 | 2 GB: 448 / 128 px · 4 GB: 960 / 224 px | mức 1–6 từ 6 GB; 2 GB nên mức 1–5 | 1 ảnh, đọc/ghi file song song | thử nghiệm |
+| Intel Arc (XPU) | Arc A380–A770, B570, B580, Arc trong Core Ultra | fp32 | 6 GB: 1280 / 320 px · 8 GB: 1536 / 384 px · 12 GB: 1536 / 512 px · 16 GB: 1536 / 608 px | mức 1–6 | 1 ảnh, đọc/ghi file song song | thử nghiệm |
+| Intel Iris Xe / UHD (XPU) | Iris Xe, UHD 7xx | fp32 | theo bộ nhớ đọc được, không đọc được thì 400 px | mức 1–5; mức 6 chậm | 1 ảnh, đọc/ghi file song song | thử nghiệm |
+| AMD Radeon qua ROCm | RX 7600–7900, RX 9060–9070 (ROCm trên Linux, bản xem trước trên Windows) | fp16 → fp32 | 8 GB: 1536 / 384 px · 16 GB: 1536 / 608 px · 24 GB: 1536 / 768 px | mức 1–6 | 2 ảnh song song khi ≥ 11 GB VRAM, 16 GB RAM, 8 luồng | thử nghiệm |
+| AMD / Intel qua DirectML | Radeon RX 5000–9000, Vega, card tích hợp | fp32 | theo bộ nhớ đọc được, không đọc được thì 400 px | mức 1–5; mức 6 chậm | 1 ảnh, đọc/ghi file song song | thử nghiệm |
+| Apple Silicon (Metal) | M1–M4 | fp32 | theo bộ nhớ đọc được, không đọc được thì 400 px | mức 1–5; mức 6 chậm | 1 ảnh, đọc/ghi file song song | thử nghiệm |
+| CPU | Mọi máy | fp32 | 400 px | mức 1–5 (model nhẹ); mức 6 rất chậm | 1 ảnh, đọc/ghi file song song | đầy đủ |
 
 ## Thay đổi ở 0.14.2 (màu cảnh ảnh cũ, Tô màu AI, preset ảnh thẻ; gộp sửa loang 0.14.1)
 

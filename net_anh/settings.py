@@ -37,7 +37,7 @@ class Settings:
     # (tools/param_sweep.py) cho IDS/SSIM cao nhất, giữ tuổi và vân da sát ảnh gốc ở cả 6 nhóm tuổi.
     fidelity: float = 0.7
     max_faces: int = 24  # ảnh nhóm: mặt nào không qua model mặt thì bị mạng nền vẽ thành mặt nạ (đo trên ảnh đội bóng 21 mặt)
-    tile: int = 400
+    tile: int = -1  # cạnh ô cắt ảnh cho mạng nền: −1 = tự động (GPU theo bộ nhớ còn trống, CPU 400), 0 = không cắt
     color_match: bool = True
     face_model: str = "gfpgan"  # "gfpgan" (GFPGAN 1.4) | "restoreformer" (RestoreFormer, chi tiết mạnh hơn)
     protect_faces: bool = True

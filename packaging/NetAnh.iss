@@ -35,6 +35,8 @@ MinVersion=10.0
 OutputDir=..\_build\output
 #if Flavor == "cuda"
 OutputBaseFilename=NetAnh-{#AppVersion}-GPU-NVIDIA-setup
+#elif Flavor == "cuda_old"
+OutputBaseFilename=NetAnh-{#AppVersion}-GPU-NVIDIA-doi-cu-setup
 #else
 OutputBaseFilename=NetAnh-{#AppVersion}-setup
 #endif
@@ -44,7 +46,7 @@ Compression=lzma2/normal
 SolidCompression=no
 ; bản CUDA vượt 2 GB: tách thành setup.exe + các file .bin (để cùng thư mục khi cài). Bản CPU để một file
 ; setup.exe duy nhất: DiskSpanning=yes luôn tách dữ liệu ra .bin, người tải mỗi setup.exe sẽ cài lỗi.
-#if Flavor == "cuda"
+#if Flavor == "cuda" || Flavor == "cuda_old"
 DiskSpanning=yes
 DiskSliceSize=1900000000
 #endif

@@ -16,7 +16,7 @@
 # Chạy được trong đường dẫn có dấu tiếng Việt và dấu cách. Giữ file này ở dạng UTF-8 CÓ BOM: PowerShell 5.1 đọc
 # file không BOM theo bảng mã ANSI, chữ có dấu thành ký tự lạ và có thể làm hỏng cú pháp.
 param(
-    [ValidateSet("cpu", "cuda", "xpu")] [string]$Flavor = "cpu",
+    [ValidateSet("cpu", "cuda", "cuda_old", "xpu")] [string]$Flavor = "cpu",  # cuda_old: GTX 10 / 900 (CUDA 12.6)
     [switch]$NoModels,
     [switch]$NoInstaller,
     [string]$Python = "",  # ví dụ "py -3.12" hoặc "python"; để trống thì tự tìm
@@ -38,7 +38,21 @@ if (-not $CapNhat -and -not $FlavorGiven -and $env:CI -ne "true") {
     if ($nv) {
         Write-Host "Máy có card $($nv.Name). Bản GPU NVIDIA nhanh hơn khoảng 10 lần nhưng nặng hơn (khoảng 3 GB, bộ cài chia thành vài file)." -ForegroundColor Yellow
         $ans = Read-Host "Tạo bản GPU NVIDIA? Gõ Enter để chọn GPU, hoặc gõ C rồi Enter để chọn bản CPU"
-        $Flavor = if ($ans -match "^[cC]") { "cpu" } else { "cuda" }
+        # GTX 10 / 900, MX1xx–3xx (Pascal, Maxwell): PyTorch CUDA 12.8 trở lên bỏ các dòng này, dùng bản CUDA 12.6
+        $old = $nv.Name -match "GTX\s*(10[5-8]0|9[5-8]0|7[5-9]0)|MX\s*[1-3][1-5]0|GT\s*10[3-9]0|TITAN X(p)?\b"
+        $Flavor = if ($ans -match "^[cC]") { "cpu" } elseif ($old) { "cuda_old" } else { "cuda" }
+    }
+}
+
+# Chọn bản GPU NVIDIA (kể cả CHUYEN_SANG_GPU.bat truyền -Flavor cuda) trên máy chỉ có card GTX 10 / 900: bản CUDA 12.8 không
+# chạy trên các dòng này, tự đổi sang bản cho card đời cũ (CUDA 12.6).
+if ($Flavor -eq "cuda" -and $env:CI -ne "true") {
+    $nvs = @()
+    try { $nvs = @(Get-CimInstance Win32_VideoController -ErrorAction Stop | Where-Object { $_.Name -match "NVIDIA" } | ForEach-Object { $_.Name }) } catch { }
+    $legacy = "GTX\s*(10[5-8]0|9[5-8]0|7[5-9]0)|MX\s*[1-3][1-5]0|GT\s*10[3-9]0|TITAN X(p)?\b"
+    if ($nvs.Count -gt 0 -and @($nvs | Where-Object { $_ -notmatch $legacy }).Count -eq 0) {
+        Write-Host "Card $($nvs[0]) là đời cũ (Pascal/Maxwell): dùng bản GPU cho card đời cũ (PyTorch CUDA 12.6)." -ForegroundColor Yellow
+        $Flavor = "cuda_old"
     }
 }
 
@@ -205,6 +219,8 @@ try {
             $cuda = @(Get-ChildItem -LiteralPath (Join-Path $AppDir "_internal\torch\lib") -Filter "*cuda*.dll" -ErrorAction SilentlyContinue).Count -gt 0
             $xpuDll = @(Get-ChildItem -LiteralPath (Join-Path $AppDir "_internal\torch\lib") -Filter "*sycl*.dll" -ErrorAction SilentlyContinue).Count -gt 0
             $Flavor = if ($cuda) { "cuda" } elseif ($xpuDll) { "xpu" } else { "cpu" }
+            $tv = Join-Path $AppDir "_internal\torch\version.py"
+            if ($cuda -and (Test-Path -LiteralPath $tv) -and ((Get-Content -LiteralPath $tv -Raw) -match "cuda\s*(:\s*\w+\s*)?=\s*'12\.6")) { $Flavor = "cuda_old" }
             $Venv = Join-Path $Work "venv-$Flavor"
         }
         Write-Host "Bản đã cài: $Flavor"
@@ -233,7 +249,7 @@ try {
     }
 
     Step "2/6 Cài thư viện vào môi trường build riêng (_build\venv-$Flavor), không đụng tới Python đang dùng"
-    $TorchIndex = switch ($Flavor) { "cuda" { "https://download.pytorch.org/whl/cu128" } "xpu" { "https://download.pytorch.org/whl/xpu" } default { "https://download.pytorch.org/whl/cpu" } }
+    $TorchIndex = switch ($Flavor) { "cuda" { "https://download.pytorch.org/whl/cu128" } "cuda_old" { "https://download.pytorch.org/whl/cu126" } "xpu" { "https://download.pytorch.org/whl/xpu" } default { "https://download.pytorch.org/whl/cpu" } }
     $keepTorch = $false
     if ($CapNhat) {
         & $Py (Join-Path $Root "packaging\kiem_torch.py")

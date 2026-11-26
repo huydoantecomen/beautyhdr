@@ -6,10 +6,10 @@ on:
   workflow_dispatch:
     inputs:
       flavor:
-        description: "cpu (nhẹ, mọi máy) | cuda (GPU NVIDIA, nặng ~3 GB) | both"
+        description: "cpu (nhẹ, mọi máy) | cuda (GPU NVIDIA từ GTX 16 / RTX 20) | cuda_old (GTX 10 / 900) | both (tất cả)"
         default: cpu
         type: choice
-        options: [cpu, cuda, both]
+        options: [cpu, cuda, cuda_old, both]
       models:
         description: "Kèm model AI trong bộ cài (~620 MB)"
         default: true
@@ -24,10 +24,11 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 120
+    continue-on-error: ${{ matrix.flavor == 'cuda_old' }}  # kho PyTorch có thể ngừng bản cu126
     strategy:
       fail-fast: false
       matrix:
-        flavor: [cpu, cuda]
+        flavor: [cpu, cuda, cuda_old]
     env:
       PIP_NO_CACHE_DIR: "1"
       PYTHONUTF8: "1"

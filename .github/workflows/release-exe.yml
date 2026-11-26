@@ -16,10 +16,13 @@ jobs:
   app:
     runs-on: windows-latest
     timeout-minutes: 150
+    # cuda_old (GTX 10 / 900, PyTorch CUDA 12.6): kho PyTorch có thể ngừng phát hành cu126 cho bản torch mới; lỗi thì
+    # bản phát hành vẫn ra, chỉ thiếu gói này (máy Pascal khi đó dùng CPU và được báo rõ lý do).
+    continue-on-error: ${{ matrix.flavor == 'cuda_old' }}
     strategy:
       fail-fast: false
       matrix:
-        flavor: [cpu, cuda, xpu]
+        flavor: [cpu, cuda, cuda_old, xpu]
     env:
       PIP_NO_CACHE_DIR: "1"
       PYTHONUTF8: "1"

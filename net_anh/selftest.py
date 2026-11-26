@@ -145,6 +145,9 @@ def dispatch(argv: list[str]) -> int | None:
             return server_main([a for a in argv[1:] if a != "--dong-lenh"])
         from .server_gui import main as server_gui_main
         return server_gui_main(argv[1:])
+    if argv[0] == "--do-gpu":  # đo tốc độ card, ghi file kết quả (net_anh/gpu_bench.py)
+        from .gpu_bench import main as bench_main
+        return bench_main(argv[1:])
     if argv[0] == "--cli":
         from .cli import main
         return main(argv[1:])
