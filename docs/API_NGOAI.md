@@ -68,7 +68,8 @@ Tối đa 8 việc cả hai loại; huỷ (`DELETE`) cũng huỷ bên fal.ai / R
 
 ## Chưa làm
 
-- App Android/PC chưa có ô chọn nguồn và hộp hỏi đồng ý (máy chủ đã sẵn API).
+- App PC có ô Nguồn xử lý và hộp hỏi đồng ý từ 0.16.0 (gọi API thẳng từ PC bằng khoá người dùng nhập, hoặc qua
+  máy chủ GPU). App Android chưa có.
 - Chưa thử với khoá thật: bộ nối viết theo tài liệu công khai của từng dịch vụ (11/2026), test dùng mạng giả lập.
   fal.ai chưa ghi rõ có nhận ảnh dạng data URI hay không; nếu bị từ chối cần thêm bước tải ảnh lên kho của fal.
 - Chưa tính credit/giới hạn theo người dùng.

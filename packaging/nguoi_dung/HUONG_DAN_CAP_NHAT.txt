@@ -1,7 +1,23 @@
-BEAUTY HDR 0.15.1: GÓI CẬP NHẬT (nhỏ, không tải lại model)
+BEAUTY HDR 0.16.0: GÓI CẬP NHẬT (nhỏ, không tải lại model)
 
-MỚI Ở BẢN 0.15.1: SỬA TỪ MÁY THẬT
+MỚI Ở BẢN 0.16.0: ĐƯA TÍNH NĂNG CÒN THIẾU VÀO SẴN
 
+- Chế độ Đơn giản, loại "Ảnh cũ": thêm hai ô "Nâng màu cảnh (ảnh cũ chụp cảnh)" và "Tô màu AI cho cảnh".
+  Cả hai tắt sẵn. Tô màu AI hỏi trước khi tải model DDColor (khoảng 912 MB, một lần). Khử bóng loáng da vẫn ở
+  "Tuỳ chọn thêm" như bản 0.13.
+- Ô mới "Xử lý ở" (Đơn giản: Tuỳ chọn thêm; Chuyên sâu: Xuất và thiết bị > Nguồn xử lý):
+    Trên máy này (mặc định, ảnh không rời máy)
+    Máy chủ GPU: gửi ảnh tới máy chủ Beauty HDR của bạn (PC khác, GPU thuê). Bấm Cài đặt…, nhập địa chỉ và mã
+      6 số hiện trên cửa sổ máy chủ. Máy chủ cũng phải cập nhật lên 0.16.0 để ảnh ra giống chạy trên máy.
+    API ngoài: fal.ai, Stability AI, Replicate bằng khoá API của bạn (Cài đặt… > tab API ngoài). Có tính phí,
+      app hỏi đồng ý trước mỗi lần gửi ảnh, bỏ EXIF, kiểm giữ khuôn mặt; dịch vụ lỗi hoặc đổi mặt thì app tự làm
+      lại bằng máy này.
+  Mỗi lần mở app, ô này về "Trên máy này".
+- Máy chủ cho điện thoại nhận thêm API ngoài (fal.ai, Stability, Replicate), xem docs/API_NGOAI.md.
+
+Chưa thử trên Windows thật và chưa thử với khoá API thật: đã chạy test trên máy Linux.
+
+CÓ TỪ BẢN 0.15.1: SỬA TỪ MÁY THẬT
 - Gói Cập nhật giải nén ở đâu cũng được: bấm CAP_NHAT.bat là app tự tìm bản cũ, hỏi chọn thư mục rồi ghi đè.
 - Khu tiến độ mới ở đáy cửa sổ: tên bước đang làm, thanh phần trăm to, thời gian đã chạy và còn lại, nút Huỷ.
   Không còn bị cắt chữ.
@@ -29,7 +45,7 @@ model đã tải nằm trong thư mục cài đặt và được giữ nguyên.
 
 CÁCH LÀM (từ 0.15.1 không phải chép gói vào đúng thư mục nữa)
 
-1. Giải nén file BeautyHDR-0.15.1-CapNhat.zip ra chỗ nào cũng được (ví dụ Desktop).
+1. Giải nén file BeautyHDR-0.16.0-CapNhat.zip ra chỗ nào cũng được (ví dụ Desktop).
 2. Đóng Beauty HDR (và cửa sổ "Máy chủ cho điện thoại" nếu đang mở).
 3. Mở thư mục vừa giải nén, bấm đúp CAP_NHAT.bat.
 4. App tự tìm bản cũ trên máy và hỏi: "Tìm thấy Beauty HDR 0.x ở ... Cập nhật thư mục này?"
@@ -42,7 +58,7 @@ CÁCH LÀM (từ 0.15.1 không phải chép gói vào đúng thư mục nữa)
 5. App ghi đè mã mới vào thư mục đó, GIỮ NGUYÊN: thư viện đã tải (ma-nguon\_build, có torch), model, lịch sử và
    preset. Rồi cửa sổ đen tự đóng gói lại chương trình (khoảng 5-10 phút), chép đè lên chỗ đã cài
    (%LOCALAPPDATA%\Programs\NetAnh) và chạy thử bằng model có sẵn. Hiện chữ XONG màu xanh là được.
-6. Mở "Beauty HDR" từ menu Start như mọi khi. Menu Trợ giúp > Giới thiệu phải ghi PC 0.15.1.
+6. Mở "Beauty HDR" từ menu Start như mọi khi. Menu Trợ giúp > Giới thiệu phải ghi PC 0.16.0.
 
 HAI KIỂU CÀI, APP TỰ NHẬN
 - Đã cài bằng file setup.exe: đóng gói lại và chép đè bản đã cài (như mô tả ở trên).

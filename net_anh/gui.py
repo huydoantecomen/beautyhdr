@@ -20,7 +20,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QColorDialog, QInputDialog, QLineEdit, QTableWidgetItem, QTabWidget,
                                QVBoxLayout, QWidget)
 
-from . import facestyle, weights
+from . import facestyle, providers, sources, weights
+from .gui_sources import SourceDialog, ask_ddcolor, consent_api, consent_server
 from .subject import SUBJECTS
 from .analysis import Analysis, recommend
 from . import gpu_profile
@@ -1551,6 +1552,30 @@ class MainWindow(QMainWindow):
         self.cb_vivid = QCheckBox()
         self.cb_vivid.setToolTip("Ảnh cũ chụp cảnh (nền không đồng màu, không phải ảnh đen trắng): nâng tông sặc sỡ hơn, da ít đổi. "
                                  "Ảnh thẻ nền đồng màu và ảnh đen trắng được bỏ qua.")
+        # Đơn giản (loại Ảnh cũ): hai ô gọn, luôn cùng trạng thái với hai ô ở Chuyên sâu. Tắt mặc định, chỉ bật khi
+        # người dùng tích (hoặc preset bật); Tô màu AI hỏi trước khi tải DDColor 912 MB.
+        self.cb_vivid2 = QCheckBox("Nâng màu cảnh (ảnh cũ chụp cảnh)")
+        self.cb_vivid2.setToolTip(self.cb_vivid.toolTip())
+        self.cb_ai_color2 = QCheckBox("Tô màu AI cho cảnh (tải 912 MB lần đầu)")
+        self.cb_ai_color2.setToolTip(self.cb_ai_color.toolTip())
+        # Nguồn xử lý (sources.py): Trên máy này (mặc định) | Máy chủ GPU | API ngoài. Hai ô (Đơn giản, Chuyên sâu) cùng
+        # giá trị. Mở app luôn về Trên máy này: ảnh không rời máy nếu người dùng không chủ động chọn.
+        src_tip = ("Nơi xử lý ảnh. Trên máy này: ảnh không rời máy (mặc định). Máy chủ GPU: gửi tới máy chủ Beauty HDR của "
+                   "bạn (PC khác, GPU thuê). API ngoài: gửi tới fal.ai, Stability AI hoặc Replicate bằng khoá API của bạn "
+                   "(tính phí, app hỏi đồng ý trước mỗi lần gửi).")
+        self.src_box, self.src_box2 = QComboBox(), QComboBox()
+        for box in (self.src_box, self.src_box2):
+            for key, text in sources.SOURCES:
+                box.addItem(text, key)
+            box.setToolTip(src_tip)
+        self.api_engine = QComboBox()
+        self.api_engine.setToolTip("Dịch vụ ngoài dùng khi Nguồn xử lý là API ngoài (chỉ hiện dịch vụ đã có khoá)")
+        self.btn_src_cfg = QPushButton("Cài đặt…")
+        self.btn_src_cfg.setToolTip("Ghép nối máy chủ GPU, nhập khoá API ngoài")
+        self.src_note = QLabel()
+        self.src_note.setObjectName("muted")
+        self.src_note.setWordWrap(True)
+        self._api_ok: set[str] = set()  # dịch vụ người dùng đã cho phép không hỏi lại trong lần mở app này
         dmg_tip = ("Tô lên chỗ bị lá vàng, vết ố, rách che mất chi tiết. App vá chỗ đó (LaMa) rồi dựng lại mặt bị hỏng "
                    "(RestoreFormer++). Mặt nhỏ dưới ~60 px chỉ vá, không bịa thêm.")
         self.btn_damage = QPushButton("Vẽ vùng hỏng nặng…")
@@ -1692,6 +1717,8 @@ class MainWindow(QMainWindow):
         ol.setContentsMargins(10, 4, 10, 10)
         ol.setSpacing(6)
         ol.addWidget(self.btn_damage2, 0, Qt.AlignmentFlag.AlignLeft)
+        ol.addWidget(self.cb_vivid2)
+        ol.addWidget(self.cb_ai_color2)
         sl.addWidget(self.id_box)
         sl.addWidget(self.old_box)
         sl.addWidget(header_bar("Tuỳ chọn thêm"))
@@ -1705,6 +1732,13 @@ class MainWindow(QMainWindow):
         lr.addWidget(lab_look)
         lr.addWidget(self.look_box2, 1)
         ow.addLayout(lr)
+        sr = QHBoxLayout()
+        sr.setSpacing(6)
+        lab_src = QLabel("Xử lý ở")
+        lab_src.setObjectName("muted")
+        sr.addWidget(lab_src)
+        sr.addWidget(self.src_box2, 1)
+        ow.addLayout(sr)
         sl.addLayout(ow)
         sl.addWidget(header_bar("Mức làm nét"))
         pw = QVBoxLayout()
@@ -1836,6 +1870,15 @@ class MainWindow(QMainWindow):
         swl.addStretch()
         sec_bg.add("Màu nền", swr, "nen anh the xanh trang do")
         sec_out = Section("Xuất và thiết bị", opened=False)
+        srw = QWidget()
+        srl = QHBoxLayout(srw)
+        srl.setContentsMargins(0, 0, 0, 0)
+        srl.setSpacing(6)
+        srl.addWidget(self.src_box, 1)
+        srl.addWidget(self.btn_src_cfg)
+        sec_out.add("Nguồn xử lý", srw, "nguon xu ly may chu gpu api ngoai fal stability replicate online")
+        sec_out.add("Dịch vụ", self.api_engine, "api ngoai fal stability replicate")
+        sec_out.add("", self.src_note, "nguon xu ly may chu api")
         sec_out.add("Thiết bị", self.device, "gpu cpu card thiết bị render")
         sec_out.add("", self.dev_note, "gpu cpu card thiết bị render")
         sec_out.add("", self.btn_cards, "gpu card khuyen nghi rtx gtx vram")
@@ -2060,6 +2103,14 @@ class MainWindow(QMainWindow):
         self.cb_restore.toggled.connect(self._to_custom)
         self.cb_vivid.toggled.connect(self._to_custom)
         self.cb_ai_color.toggled.connect(self._to_custom)
+        for cb in (self.cb_vivid, self.cb_vivid2):
+            cb.toggled.connect(self._vivid_toggled)
+        for cb in (self.cb_ai_color, self.cb_ai_color2):
+            cb.toggled.connect(self._ai_color_toggled)
+        for box in (self.src_box, self.src_box2):
+            box.currentIndexChanged.connect(lambda _=0, b=box: self._source_changed(b))
+        self.btn_src_cfg.clicked.connect(lambda: self._source_settings())
+        self._source_changed(self.src_box)
         self.btn_damage.clicked.connect(self._draw_damage)
         self.btn_damage2.clicked.connect(self._draw_damage)
         self.cb_keep_lips.toggled.connect(self._to_custom)
@@ -2180,6 +2231,10 @@ class MainWindow(QMainWindow):
     def _simple_apply(self):
         kind, power = self.simple_kind, self.simple_power
         n = None if power == "auto" else int(power)
+        # đổi mức nét trong cùng loại Ảnh cũ: giữ hai ô Nâng màu cảnh / Tô màu AI người dùng đã tích
+        keep_scene = (kind == "old" and getattr(self, "_scene_kind", None) == "old",
+                      self.cb_vivid.isChecked(), self.cb_ai_color.isChecked())
+        self._scene_kind = kind
         if n is None:
             key = KIND_PRESET[kind]
             self.preset.blockSignals(True)
@@ -2201,6 +2256,13 @@ class MainWindow(QMainWindow):
             self.mode.setCurrentIndex(self.mode.findData("upscale"))
         for w in boxes:
             w.blockSignals(False)
+        if keep_scene[0]:
+            for pair_, on in (((self.cb_vivid, self.cb_vivid2), keep_scene[1]),
+                              ((self.cb_ai_color, self.cb_ai_color2), keep_scene[2])):
+                for cb in pair_:
+                    cb.blockSignals(True)
+                    cb.setChecked(on)
+                    cb.blockSignals(False)
         self._set_bg_color(self.bg_color)
         self._mode_changed(update_custom=False)
         self._update_hw_warn()
@@ -2404,6 +2466,85 @@ class MainWindow(QMainWindow):
         self._set_deshine(self.sl_deshine.value() if on else 0.0)
         self.say("Khử bóng loáng da: " + (f"bật ({self.sl_deshine.value() * 100:.0f} %)" if on else "tắt"))
 
+    def _set_pair(self, boxes, on: bool):
+        for cb in boxes:
+            cb.blockSignals(True)
+            cb.setChecked(on)
+            cb.blockSignals(False)
+
+    def _vivid_toggled(self, on: bool):
+        """Nâng màu cảnh (hai ô cùng trạng thái). Tắt thì Tô màu AI cũng tắt (Tô màu AI chạy trên bước nâng màu cảnh)."""
+        self._set_pair((self.cb_vivid, self.cb_vivid2), on)
+        if not on:
+            self._set_pair((self.cb_ai_color, self.cb_ai_color2), False)
+        self._to_custom()
+        self.say("Nâng màu cảnh ảnh cũ: " + ("bật" if on else "tắt"))
+
+    def _ai_color_toggled(self, on: bool):
+        """Tô màu AI (DDColor): hỏi trước khi tải 912 MB; bật thì tự bật Nâng màu cảnh."""
+        if on and not ask_ddcolor(self):
+            on = False
+        self._set_pair((self.cb_ai_color, self.cb_ai_color2), on)
+        if on:
+            self._set_pair((self.cb_vivid, self.cb_vivid2), True)
+        self._to_custom()
+        self.say("Tô màu AI cho cảnh: " + ("bật (DDColor)" if on else "tắt"))
+
+    # ----- nguồn xử lý -----
+
+    def _source(self) -> str:
+        return self.src_box.currentData() or "local"
+
+    def _fill_api_engines(self) -> dict:
+        cfg = providers.load_config()
+        engs = providers.engines(cfg)
+        keep = self.api_engine.currentData()
+        self.api_engine.blockSignals(True)
+        self.api_engine.clear()
+        for e in engs.values():
+            self.api_engine.addItem(f"{e.label} · {e.price}", e.id)
+        if keep:
+            self.api_engine.setCurrentIndex(max(0, self.api_engine.findData(keep)))
+        self.api_engine.blockSignals(False)
+        self._api_guard = providers.guard_threshold(cfg)
+        return engs
+
+    def _source_changed(self, box):
+        key = box.currentData() or "local"
+        for b in (self.src_box, self.src_box2):
+            if b is not box:
+                b.blockSignals(True)
+                b.setCurrentIndex(b.findData(key))
+                b.blockSignals(False)
+        engs = self._fill_api_engines()
+        self.api_engine.setVisible(key == "api")
+        remote = sources.load_remote()
+        if key == "server" and not remote.get("token"):
+            note = "Chưa ghép nối máy chủ GPU. Bấm Cài đặt… để nhập địa chỉ và mã 6 số."
+        elif key == "server":
+            note = f"Gửi ảnh tới máy chủ {remote.get('name') or remote.get('url')} ({remote.get('device') or '?'})."
+        elif key == "api" and not engs:
+            note = "Chưa có khoá API ngoài nào. Bấm Cài đặt… để nhập khoá."
+        elif key == "api":
+            note = ("⚠ Ảnh gửi ra dịch vụ ngoài, có tính phí, app hỏi trước mỗi lần. Chỉ làm nét/phóng to: khử bóng da, "
+                    "tông mẫu, đổi nền, khôi phục ảnh cũ không áp dụng.")
+        else:
+            note = ""
+        self.src_note.setText(note)
+        self.src_note.setVisible(bool(note))
+        if hasattr(self, "simple_eta") and key != "local":
+            self.simple_eta.setText("Xử lý ở " + box.currentText())
+        elif hasattr(self, "simple_eta"):
+            self._update_hw_warn()
+        if box.hasFocus() or box.view().isVisible():
+            self.say("Nguồn xử lý: " + box.currentText())
+            if (key == "server" and not remote.get("token")) or (key == "api" and not engs):
+                QTimer.singleShot(0, lambda: self._source_settings("api" if key == "api" else "server"))
+
+    def _source_settings(self, tab: str | None = None):
+        SourceDialog(self, tab or ("api" if self._source() == "api" else "server")).exec()
+        self._source_changed(self.src_box)
+
     def _apply_settings(self, s: Settings):
         widgets = (self.mode, self.preset, self.scale, self.cb_denoise_auto, self.cb_lowlight, self.face_model,
                    self.bg_model, self.cb_detail_same, self.cb_keep_lips, self.subject, self.cb_restore, self.cb_vivid, self.cb_ai_color)
@@ -2422,8 +2563,14 @@ class MainWindow(QMainWindow):
         self.sl_tone.set(s.tone)
         self.cb_lowlight.setChecked(s.low_light)
         self.cb_restore.setChecked(s.repair > 0 or s.fade > 0 or s.auto_rotate)
-        self.cb_vivid.setChecked(s.scene_vivid > 0)
-        self.cb_ai_color.setChecked(s.scene_ai > 0)
+        for cb in (self.cb_vivid, self.cb_vivid2):
+            cb.blockSignals(True)
+            cb.setChecked(s.scene_vivid > 0)
+            cb.blockSignals(False)
+        for cb in (self.cb_ai_color, self.cb_ai_color2):
+            cb.blockSignals(True)
+            cb.setChecked(s.scene_ai > 0 and s.scene_vivid > 0)
+            cb.blockSignals(False)
         self.sl_fid.set(s.fidelity)
         self.cb_detail_same.setChecked(s.detail_fidelity is None)
         self.sl_detail.set(s.fidelity if s.detail_fidelity is None else s.detail_fidelity)
@@ -2942,6 +3089,11 @@ class MainWindow(QMainWindow):
     def run_single(self):
         if self.src_img is None or self._busy():
             return
+        src = self._source()
+        if src == "server":
+            return self._run_on_server()
+        if src == "api":
+            return self._run_on_api()
         s = self.settings()
         missing = [m for m in models_needed(s) if weights.status(m) != "ready"]
         if missing:
@@ -2959,11 +3111,83 @@ class MainWindow(QMainWindow):
 
         self._start(work, self._finished, "xử lý ảnh")
 
+    def _run_on_server(self):
+        """Nguồn xử lý Máy chủ GPU: gửi ảnh + đủ bộ thông số lên máy chủ Beauty HDR đã ghép nối."""
+        cfg = sources.load_remote()
+        if not cfg.get("token"):
+            self._source_settings("server")
+            cfg = sources.load_remote()
+            if not cfg.get("token"):
+                return
+        if not consent_server(self, cfg):
+            self.say("Không gửi ảnh. Chọn Xử lý ở: Trên máy này để làm nét bằng máy này.")
+            return
+        s = self.settings()
+        url, token = cfg["url"], cfg["token"]
+        img = self.src_img
+        level = self.level_choice or (self.level_group.checkedId() if self.level_group.checkedId() > 0 else "auto")
+        self._eta_s = 0.0
+        self.say(f"Bắt đầu trên máy chủ {cfg.get('name') or url}: {MODES.get(s.mode, s.mode)}, {self._scale_text(s)}")
+
+        def work(job: Job):
+            info = sources.server_info(url)
+            feats = info.get("features") or []
+            lost = sources.lost_on_old_server(s, feats)
+            if lost:
+                job.message.emit("⚠ Máy chủ bản cũ bỏ qua: " + ", ".join(lost) + " (cập nhật máy chủ lên 0.16.0)")
+            try:
+                res, rep_d = sources.run_on_server(url, token, img, sources.server_params(s, level, feats),
+                                                   job.message.emit, lambda: job.stop)
+            except providers.ProviderCancelled:
+                raise Cancelled()
+            except sources.SourceError as e:
+                if e.code in ("unauthorized", "http_401"):
+                    raise RuntimeError("Máy chủ không nhận mã kết nối nữa: ghép nối lại ở Nguồn xử lý → Cài đặt…")
+                raise RuntimeError(str(e))
+            return res, sources.report_from_server(rep_d, url), s
+
+        self._start(work, self._finished, "xử lý ảnh")
+
+    def _run_on_api(self):
+        """Nguồn xử lý API ngoài: hỏi đồng ý, gửi ảnh, kiểm giữ mặt trên máy này; lỗi/đổi mặt → làm bằng máy này."""
+        engs = self._fill_api_engines()
+        e = engs.get(self.api_engine.currentData() or "")
+        if e is None:
+            self._source_settings("api")
+            engs = self._fill_api_engines()
+            e = engs.get(self.api_engine.currentData() or "")
+            if e is None:
+                return
+        if not consent_api(self, e, self._api_ok):
+            self.say("Không gửi ảnh. Chọn Xử lý ở: Trên máy này để làm nét bằng máy này.")
+            return
+        s = self.settings()
+        img = self.src_img
+        guard = getattr(self, "_api_guard", providers.GUARD_IDS)
+        self._eta_s = 0.0
+        self.say(f"Bắt đầu: gửi ảnh tới {e.label} ({e.price})")
+
+        def work(job: Job):
+            eng = self._engine_for(job)
+            t0 = time.perf_counter()
+            try:
+                r = sources.run_api(eng, e, img, s.upscale, job.message.emit, lambda: job.stop, guard)
+            except providers.ProviderCancelled:
+                raise Cancelled()
+            if r.used_api:
+                return r.img, sources.report_from_api(e, r, round(time.perf_counter() - t0, 2)), s
+            job.message.emit("⚠ " + r.note)
+            res, rep = eng.process(img, s)
+            rep.notes.insert(0, r.note)
+            return res, rep, s
+
+        self._start(work, self._finished, "xử lý ảnh")
+
     def _gpu_warning(self, rep) -> str:
         """Đã chọn GPU (hoặc Tự động trên máy có GPU dùng được) mà ảnh chạy bằng CPU: lý do rõ ràng thay vì im lặng."""
         want = self.device.currentData()
         has_gpu = any(d.kind != "cpu" for d in getattr(self, "_devices", []))
-        if rep.device_kind != "cpu" or want == "cpu" or not has_gpu:
+        if rep.device_kind != "cpu" or want == "cpu" or not has_gpu:  # "remote"/"external": không chạy ở máy này
             return ""
         why = next((n for n in rep.notes if n.startswith("GPU lỗi")), "")
         return ("⚠ Đã chọn GPU nhưng ảnh này chạy bằng CPU (chậm hơn nhiều)"
@@ -3055,6 +3279,8 @@ class MainWindow(QMainWindow):
         if not files:
             QMessageBox.information(self, APP_NAME, "Thư mục không có ảnh.")
             return
+        if self._source() != "local":
+            self.say("Làm cả thư mục luôn chạy trên máy này (Máy chủ GPU / API ngoài hiện chỉ dùng cho từng ảnh).")
         dst = QFileDialog.getExistingDirectory(self, "Chọn thư mục lưu kết quả")
         if not dst:
             return

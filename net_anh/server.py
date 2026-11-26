@@ -58,9 +58,11 @@ MAX_QUEUE = 8  # việc chờ tối đa (cả đang chạy)
 KEEP_SECONDS = 15 * 60  # giữ kết quả để điện thoại lấy lại
 MAX_FAILS, LOCK_SECONDS = 5, 60
 LEVEL_NAMES = {"auto": "Tự động", 1: "Nhẹ", 2: "Vừa", 3: "Rõ", 4: "Rất rõ", 5: "Tối đa", 6: "Cao nhất"}
-FEATURES = ("restore", "bg", "subject", "styles", "deshine", "engine")  # tham số thêm của POST /api/v1/jobs
-# (từ 0.10.2; deshine từ 0.13.0; engine từ 0.16.0: engine=<id> consent=1 guard=0|1, danh sách ở info["engines"])
+FEATURES = ("restore", "bg", "subject", "styles", "deshine", "engine", "settings")  # tham số thêm của POST /api/v1/jobs
+# (từ 0.10.2; deshine từ 0.13.0; engine từ 0.16.0: engine=<id> consent=1 guard=0|1, danh sách ở info["engines"];
+# settings từ 0.16.0: settings=<JSON Settings đầy đủ> do app PC gửi (Nguồn xử lý: Máy chủ GPU), thay cho mức nét)
 MAX_STYLES_CHARS = 8192
+MAX_SETTINGS_CHARS = 24000
 IMAGE_EXT = {"image/jpeg": ".jpg", "image/jpg": ".jpg", "image/png": ".png", "image/webp": ".webp",
              "image/bmp": ".bmp", "image/tiff": ".tif"}
 
@@ -268,6 +270,16 @@ def parse_extra(q: dict) -> dict:
         except (ValueError, RecursionError, facestyle.PresetError):
             raise ApiError(400, "bad_styles", "styles không phải kiểu mặt hợp lệ") from None
         extra["face_styles"] = {k: v.to_dict() for k, v in styles.items()}
+    full = q.get("settings", "")
+    if full:  # app PC gửi đủ bộ thông số: máy chủ chạy đúng như trên PC (bỏ qua level, restore, bg… ở trên)
+        from .settings import Settings
+        if len(full) > MAX_SETTINGS_CHARS:
+            raise ApiError(400, "bad_settings", "settings quá dài")
+        try:
+            s = Settings.from_dict(json.loads(full))
+        except (ValueError, TypeError, RecursionError):
+            raise ApiError(400, "bad_settings", "settings không phải bộ thông số hợp lệ") from None
+        return {"__settings__": s}
     return extra
 
 
@@ -490,10 +502,15 @@ class Worker:
         """Pipeline của máy này. `path` = file tạm để đọc EXIF hãng máy (None khi ảnh đã giải mã ở bước API ngoài)."""
         eng = self.eng
         job.progress = "Đang phân tích ảnh…"
-        s, an, why, phone_desc = build_settings(eng, img, Path(path) if path else None, job.level, job.phone,
-                                                job.upscale)
-        if job.extra:
-            s = s.with_(**job.extra)
+        full = job.extra.get("__settings__") if job.extra else None
+        if full is not None:  # app PC gửi đủ thông số (tính năng "settings"): chỉ phân tích để ghi báo cáo
+            an = eng.analyze(img, with_faces=True)
+            s, why, phone_desc = full, ["thông số do app PC gửi"], full.phone
+        else:
+            s, an, why, phone_desc = build_settings(eng, img, Path(path) if path else None, job.level, job.phone,
+                                                    job.upscale)
+            if job.extra:
+                s = s.with_(**job.extra)
         eng._check()
         self.say(f"Ảnh {img.shape[1]}×{img.shape[0]} từ {job.device}: mức {LEVEL_NAMES.get(job.level, job.level)}, "
                  f"model mặt {s.face_model}, nền {s.sr_model}")

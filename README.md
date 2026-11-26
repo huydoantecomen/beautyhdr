@@ -156,7 +156,21 @@ App Android bật **Chất lượng cao nhất** thì gửi ảnh tới PC này 
 có thì điện thoại tự xử lý trên máy. Mở **Beauty HDR - Máy chủ cho điện thoại** (menu Start), `may_chu.bat` hoặc
 `python -m net_anh.server`. Cài đặt, ghép nối, dùng ở ngoài qua Tailscale, API: [docs/MAY_CHU.md](docs/MAY_CHU.md).
 
-## Thay đổi ở 0.16.0 (cổng kết nối API xử lý ảnh ngoài)
+## Thay đổi ở 0.16.0 (cổng kết nối API xử lý ảnh ngoài, nguồn xử lý trên PC)
+
+- Chế độ Đơn giản, loại Ảnh cũ: hai ô gọn **Nâng màu cảnh** và **Tô màu AI cho cảnh** (DDColor), cùng trạng thái với
+  hai ô ở Chuyên sâu → Khôi phục ảnh cũ. Tắt mặc định (chỉ bật khi người dùng tích hoặc preset bật); đổi mức nét trong
+  cùng loại Ảnh cũ thì giữ nguyên. Tô màu AI hỏi trước khi tải 912 MB; bật Tô màu AI tự bật Nâng màu cảnh, tắt Nâng màu
+  cảnh thì Tô màu AI cũng tắt. Khử bóng loáng da đã có ở Đơn giản từ 0.13.
+- **Nguồn xử lý** (Đơn giản: Tuỳ chọn thêm → Xử lý ở; Chuyên sâu: Xuất và thiết bị): Trên máy này (mặc định, mở app luôn
+  về đây) | Máy chủ GPU | API ngoài. Mã: `net_anh/sources.py`, hộp thoại `net_anh/gui_sources.py`.
+  - Máy chủ GPU: ghép nối mã 6 số với một máy chủ Beauty HDR (PC khác, GPU thuê), gửi ảnh qua API v1 kèm đủ bộ thông
+    số (`settings=<JSON>`, tính năng mới `settings` của máy chủ, kiểm từng trường bằng `Settings.from_dict`). Máy chủ cũ
+    chỉ nhận mức nét và vài tuỳ chọn, app báo phần bị bỏ qua. Lần đầu với mỗi địa chỉ hỏi đồng ý gửi ảnh.
+  - API ngoài: khoá do người dùng nhập (Cài đặt… → API ngoài, lưu `~/.net_anh/providers.json` trên máy này). Hỏi đồng ý
+    trước mỗi lần gửi (cảnh báo riêng tư, giá; "không hỏi lại" chỉ đến khi đóng app), bỏ EXIF, kiểm giữ mặt ArcFace trên
+    máy này; API lỗi hoặc đổi mặt thì tự làm lại bằng máy này và ghi lý do.
+  - Làm cả thư mục vẫn chạy trên máy này.
 
 - Máy chủ cho điện thoại nhận thêm nguồn xử lý ngoài: fal.ai Clarity, Stability AI Upscale (Conservative, Fast),
   Replicate (model tự chọn). Khoá API chỉ đặt trên máy chủ (biến môi trường hoặc `~/.net_anh/providers.json`), app chọn
